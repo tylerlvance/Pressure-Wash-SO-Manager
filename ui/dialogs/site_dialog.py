@@ -462,6 +462,24 @@ class SiteDialog(QDialog):
         self.accept()
 
     def values(self) -> dict:
+        """
+        Collect the current site fields from the dialog into a dictionary.
+        
+        When this dialog was used to create a new site (no backing _obj), also includes
+        "services_selected_names": a list of display names for services with the Active
+        checkbox checked in the services table.
+        
+        Returns:
+            dict: Dictionary with keys:
+                - name: site name string
+                - address: address string
+                - poc_name: point-of-contact name string
+                - poc_phone: point-of-contact phone string
+                - poc_email: point-of-contact email string
+                - cadence_text: cadence selection string
+                - notes: notes string
+                - services_selected_names (optional): list of service display names selected in the table
+        """
         vals = dict(
             name=self.site_name.text().strip(),
             address=self.address.toPlainText().strip(),

@@ -141,6 +141,17 @@ class CustomerSiteDetailsDialog(QDialog):
 
     # ---------- style to match your modern dialogs and improve selection contrast
     def _apply_style(self):
+        """
+        Apply the dialog's visual styling by setting a consistent stylesheet for title, group boxes, input widgets, table selection, headers, and the total label.
+        
+        This method sets the widget stylesheet to define:
+        - Dialog title appearance (font size and weight)
+        - Group box font weight
+        - Padding for QLineEdit and QTextEdit
+        - Selected table row background and text colors for better readability
+        - Header section background, border, padding, and font weight
+        - Styling for the total label to appear bold and padded
+        """
         self.setStyleSheet("""
         QLabel#dlgTitle { font-size: 18px; font-weight: 600; padding-left: 8px; }
         QGroupBox { font-weight: 600; }

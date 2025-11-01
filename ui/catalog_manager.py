@@ -346,6 +346,11 @@ class CatalogManagerDialog(QDialog):
 
     # ---------- filter ----------
     def _apply_filter(self):
+        """
+        Filter the table to show only rows whose name or description contains the search text.
+        
+        The current text from the search field is trimmed and compared case-insensitively against each row's Name and Description; rows that do not contain the needle are hidden.
+        """
         needle = (self.search.text() or "").strip().lower()
         for r in range(self.tbl.rowCount()):
             name = self.tbl.item(r, 0).text().lower() if self.tbl.item(r, 0) else ""

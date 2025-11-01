@@ -490,6 +490,30 @@ class Repo:
         return f"FPC-{d}-SO{so_id}"
 
     def invoice_seed_for_so(self, so_id: int, *, terms_days: int = 14) -> dict:
+        """
+        Assembles invoice seed data for a service order suitable for creating an invoice.
+        
+        Parameters:
+            so_id (int): ID of the ServiceOrder to build invoice data for.
+            terms_days (int): Number of days from today until the invoice due date (default 14).
+        
+        Returns:
+            dict: A dictionary containing invoice fields:
+                - invoice_no (str): Generated invoice identifier.
+                - invoice_date (date): Date of the invoice (today).
+                - due_date (date): Invoice due date (today + terms_days).
+                - notes (str): Trimmed notes from the service order.
+                - line_items_cents (list[tuple[str, int]]): List of (description, amount_in_cents).
+                - subtotal_cents (int): Sum of line item amounts in cents.
+                - bill_to_name (str): Customer name for billing.
+                - bill_to_addr (str): Billing address (site address if present).
+                - bill_to_contact (str): Phone and/or email contact for billing.
+                - so_title (str): Service order title.
+                - so_desc (str): Service order description.
+        
+        Raises:
+            ValueError: If the ServiceOrder identified by `so_id` does not exist.
+        """
         so = self.s.get(ServiceOrder, so_id)
         if not so:
             raise ValueError("ServiceOrder not found")

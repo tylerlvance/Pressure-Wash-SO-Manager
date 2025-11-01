@@ -48,5 +48,11 @@ class PdfPreview(QWidget):
         return True
 
     def has_preview(self) -> bool:
+        """
+        Indicates whether a temporary PDF preview is available.
+        
+        Returns:
+            True if a temporary preview path is stored, False otherwise.
+        """
         return bool(self._temp_pdf)
 # coderabbit-review-marker

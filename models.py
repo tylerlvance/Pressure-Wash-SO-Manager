@@ -288,6 +288,11 @@ def _collapse_right_panel(self):
         self.splitter.setSizes([sizes[0], sizes[1] + sizes[2], 0])
 
 def _expand_right_panel(self):
+    """
+    Restore and show the right-side panel in the UI, update the toggle state, and set splitter sizes.
+    
+    If previously saved splitter sizes are available and valid, those sizes are restored; otherwise a default three-pane size layout is applied. The toggle button text and the internal collapsed flag are updated to reflect the expanded state.
+    """
     self.right_panel.setVisible(True)
     self._right_collapsed = False
     self.btn_toggle_right.setText("Hide Month")

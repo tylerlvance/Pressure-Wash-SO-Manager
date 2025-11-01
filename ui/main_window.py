@@ -88,6 +88,19 @@ class _SoFilterProxy(QSortFilterProxyModel):
 
 class MainWindow(QMainWindow):
     def __init__(self, SessionLocal):
+        """
+        Initialize the MainWindow, creating a database session, repository, UI, and loading initial data and preferences.
+        
+        Parameters:
+            SessionLocal (callable): A SQLAlchemy session factory used to create a new Session for the window.
+        
+        Description:
+            - Creates and stores a DB session and repository.
+            - Sets window title and optional icon.
+            - Initializes date and month-filter state and UI state flags.
+            - Loads persisted UI preferences, builds the UI, restores filter preferences, and ensures the center status filter starts as "Open".
+            - Loads initial data for customers, the month view, and the center service-order scope.
+        """
         super().__init__()
         self.SessionLocal = SessionLocal
         self.session: Session = SessionLocal()
@@ -123,12 +136,22 @@ class MainWindow(QMainWindow):
 
     # --- Right panel collapse/expand (single authoritative copy) ---
     def _toggle_right_panel(self):
+        """
+        Toggle the right-side panel between collapsed and expanded states.
+        
+        When collapsing, hides the right panel and adjusts splitter sizes to preserve layout; when expanding, shows the right panel and restores previously saved splitter sizes if available.
+        """
         if getattr(self, "_right_collapsed", False):
             self._expand_right_panel()
         else:
             self._collapse_right_panel()
 
     def _collapse_right_panel(self):
+        """
+        Collapse the right-side month panel and adjust splitter layout.
+        
+        Saves the current splitter sizes for later restoration, hides the right panel, marks the UI as collapsed, updates the toggle button text when present, and collapses the right splitter pane so it receives no width.
+        """
         try:
             self._saved_sizes = self.splitter.sizes()
         except Exception:
@@ -142,6 +165,11 @@ class MainWindow(QMainWindow):
             self.splitter.setSizes([sizes[0], sizes[1] + sizes[2], 0])
 
     def _expand_right_panel(self):
+        """
+        Expand and show the right-side month panel, restore splitter sizes, and update related UI state.
+        
+        If previously saved splitter sizes are available and valid, those sizes are restored; otherwise a sensible default split is applied. Also marks the panel as expanded and updates the toggle button text when present.
+        """
         self.right_panel.setVisible(True)
         self._right_collapsed = False
         if hasattr(self, "btn_toggle_right"):
@@ -621,6 +649,12 @@ class MainWindow(QMainWindow):
         self.table_site_sos.horizontalHeader().sectionResized.connect(lambda *_: self._persist_sos_column_widths())
 
     def _update_center_count(self):
+        """
+        Update the center table's count label to reflect visible and total service orders.
+        
+        Sets the label to "N" when the number of visible rows equals the total rows, or "V/T" when they differ,
+        where V is the visible row count from the proxy and T is the total row count from the source model's rows attribute.
+        """
         src: SoTableModel = self.proxy_site.sourceModel() if hasattr(self, "proxy_site") else None
         total = len(getattr(src, "rows", [])) if src else 0
         visible = self.proxy_site.rowCount() if hasattr(self, "proxy_site") else 0
@@ -630,6 +664,11 @@ class MainWindow(QMainWindow):
     # Customer / Site actions
     # -----------------------------
     def _manage_catalog(self):
+        """
+        Open the catalog manager dialog for editing catalogs and related data.
+        
+        Opens a modal CatalogManagerDialog using the current database session and blocks until the dialog is closed.
+        """
         dlg = CatalogManagerDialog(self.session, self)
         dlg.exec()
 
@@ -938,6 +977,9 @@ class MainWindow(QMainWindow):
         self._refresh_month()
 
     def _goto_this_month(self):
+        """
+        Set the internal year and month to today's date and refresh the month panel.
+        """
         t = date.today()
         self._year, self._month = t.year, t.month
         self._refresh_month()

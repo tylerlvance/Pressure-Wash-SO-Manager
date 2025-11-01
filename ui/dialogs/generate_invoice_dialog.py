@@ -182,6 +182,11 @@ class GenerateInvoiceDialog(QDialog):
         QMessageBox.information(self, "Preview", "Preview is refreshed. Use Generate to produce the PDF.")
 
     def generate(self):
+        """
+        Generate the invoice PDF from the dialog's current inputs, export it using the selected Excel template, and create or update the corresponding Invoice record in the repository.
+        
+        Validates that a repository handle and service-order id are present and that the selected template file exists; aborts early with a warning dialog if these checks fail. Collects line items, discount, tax percentage, notes, invoice number, and ISO-formatted invoice/due dates (if date parsing fails they are set to None). Ensures the output directory exists, invokes the template export to write the PDF, and on success creates or updates an Invoice row (subtotal, tax, total are computed in cents; tax is rounded to the nearest cent and discount is converted to cents). Marks the ServiceOrder as invoiced when present and commits the session. User-facing errors during export or DB update are shown via message dialogs; on successful completion an informational dialog is shown and the dialog is accepted.
+        """
         if not (self.repo and self.so_id):
             QMessageBox.warning(self, "Generate", "Missing repo or SO id.")
             return

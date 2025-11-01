@@ -164,6 +164,18 @@ class ServiceOrderDialog(QDialog):
 
     # ----- values out
     def values(self) -> dict:
+        """
+        Collects the dialog's current form values into a dictionary.
+        
+        Returns:
+            dict: Mapping with keys:
+                - title: stripped title text from the title field.
+                - description: stripped plain-text description.
+                - scheduled_date: scheduled date as a Python date.
+                - completed: `True` if the Completed checkbox is checked, `False` otherwise.
+                - invoiced: `True` if the Invoiced checkbox is checked, `False` otherwise.
+                - notes: stripped plain-text notes.
+        """
         sd = self.scheduled.date().toPython()
         return dict(
             title=self.title.text().strip(),
