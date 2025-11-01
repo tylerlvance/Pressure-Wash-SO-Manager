@@ -86,3 +86,4 @@ class SoTable(QTableView):
         super().setModel(model)
         # Auto-size some columns for clarity
         self.resizeColumnsToContents()
+# coderabbit-review-marker

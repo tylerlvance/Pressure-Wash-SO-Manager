@@ -484,3 +484,4 @@ class SiteDialog(QDialog):
                         selected.append(name)
             vals["services_selected_names"] = selected
         return vals
+# coderabbit-review-marker

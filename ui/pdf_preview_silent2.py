@@ -88,3 +88,4 @@ class SilentPdfPreview(QWidget):
         QTimer.singleShot(50, SilentPdfPreview._sweep_noerror_boxes)
 
         return ok
+# coderabbit-review-marker

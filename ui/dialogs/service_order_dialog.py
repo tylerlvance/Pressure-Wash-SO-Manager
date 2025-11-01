@@ -173,3 +173,4 @@ class ServiceOrderDialog(QDialog):
             invoiced=self.invoiced.isChecked(),
             notes=self.notes.toPlainText().strip(),
         )
+# coderabbit-review-marker

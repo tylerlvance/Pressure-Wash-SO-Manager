@@ -217,3 +217,4 @@ class CustomerDialog(QDialog):
             self.name.setFocus()
             return
         self.accept()
+# coderabbit-review-marker

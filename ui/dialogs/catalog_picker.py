@@ -167,3 +167,4 @@ class CatalogPickerDialog(QDialog):
                 if cid is not None:
                     out.append(int(cid))
         return out
+# coderabbit-review-marker

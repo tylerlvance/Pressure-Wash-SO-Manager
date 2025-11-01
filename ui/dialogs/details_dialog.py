@@ -157,3 +157,4 @@ class CustomerSiteDetailsDialog(QDialog):
         }
         QLabel#totalLabel { font-weight: 600; padding: 4px 2px; }
         """)
+# coderabbit-review-marker

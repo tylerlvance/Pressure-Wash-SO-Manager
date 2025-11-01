@@ -22,3 +22,4 @@ if not s.lstrip().startswith(header):
 # Write back as UTF-8
 p.write_text(s, encoding="utf-8", newline="\n")
 print("models.py normalized to UTF-8 and saved.")
+# coderabbit-review-marker

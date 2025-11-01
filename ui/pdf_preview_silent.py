@@ -49,3 +49,4 @@ class PdfPreview(QWidget):
 
     def has_preview(self) -> bool:
         return bool(self._temp_pdf)
+# coderabbit-review-marker

@@ -296,3 +296,4 @@ def _expand_right_panel(self):
     else:
         self.splitter.setSizes([320, 820, 500])
 
+# coderabbit-review-marker
