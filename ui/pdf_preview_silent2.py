@@ -54,7 +54,21 @@ class SilentPdfPreview(QWidget):
                         pass
 
     def load_pdf(self, path: str) -> bool:
-        """Load a PDF quietly, avoiding Qt's stray 'NoError' popup."""
+        """
+        Attempt to load a PDF file into the preview while suppressing stray Qt message boxes.
+        
+        If the given path is empty or does not point to a file, the function returns `False` immediately.
+        On a successful synchronous load the document is stored for preview and view modes are set.
+        If the underlying Qt load raises an exception, an asynchronous retry is scheduled, the view modes are set,
+        and the function returns `True` to indicate the preview attempt was started.
+        
+        Parameters:
+            path (str): Filesystem path to the PDF to load.
+        
+        Returns:
+            True if the document reports no Qt PDF errors after a synchronous load, `False` if the path is invalid
+            or the synchronous load indicates an error.
+        """
         if not path or not os.path.isfile(path):
             return False
 

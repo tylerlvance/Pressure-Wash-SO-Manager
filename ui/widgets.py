@@ -83,6 +83,12 @@ class SoTable(QTableView):
         self.horizontalHeader().setStretchLastSection(True)
 
     def setModel(self, model: SoTableModel):
+        """
+        Set the table view's model and adjust column widths to fit their contents.
+        
+        Parameters:
+            model (SoTableModel): The data model to install in this view.
+        """
         super().setModel(model)
         # Auto-size some columns for clarity
         self.resizeColumnsToContents()

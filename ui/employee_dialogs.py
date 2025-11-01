@@ -315,7 +315,11 @@ class AssignStaffDialog(QDialog):
         self.lbl_info.setText(f"Active employees: {self.list.count()}  |  Assigned: {len(assigned_ids)}")
 
     def _apply(self):
-        """Unassign anyone unchecked, then assign all checked."""
+        """
+        Update service-order staff assignments to match the checked items in the list.
+        
+        Unassigns employees that are currently assigned to the service order but are unchecked in the UI, and assigns all employees whose items are checked. On partial failures, shows a warning listing errors and refreshes the list; on full success, shows a confirmation and refreshes the list.
+        """
         if not (self.repo and self.so_id):
             return
 

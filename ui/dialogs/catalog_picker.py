@@ -158,6 +158,12 @@ class CatalogPickerDialog(QDialog):
 
     # ---------- API ----------
     def selected_ids(self) -> List[int]:
+        """
+        Collect the ids of table rows whose checkbox in column 0 is checked.
+        
+        Returns:
+            List[int]: A list of ids for rows with a checked checkbox; each id is read from the table item at self._id_col using Qt.UserRole.
+        """
         out: List[int] = []
         for r in range(self.tbl.rowCount()):
             w = self.tbl.cellWidget(r, 0)

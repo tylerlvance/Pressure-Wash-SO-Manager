@@ -212,6 +212,11 @@ class CustomerDialog(QDialog):
 
     # ---------- Save handler
     def _on_save(self):
+        """
+        Validate required fields and close the dialog if valid.
+        
+        Checks that the name field contains non-whitespace text; if empty, shows a warning message, focuses the name field, and does not close the dialog. If the name is present, accepts the dialog.
+        """
         if not self.name.text().strip():
             QMessageBox.warning(self, "Missing", "Customer name is required.")
             self.name.setFocus()

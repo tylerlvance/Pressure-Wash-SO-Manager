@@ -322,6 +322,11 @@ class InvoiceDialog(QDialog):
 
     # ---------- generate ----------
     def _export_final_pdf(self):
+        """
+        Generate and save the final invoice PDF from the current UI data, attach it to the service order, and close the dialog on success.
+        
+        Creates a PDF using the configured invoice template and the form values (line items, discount, tax, notes, invoice number and dates), saves it to the service order's attachments directory using a suggested file name, and opens a success information dialog with a file link before accepting (closing) the dialog. The method also tries to add the PDF as an attachment to the service order and to mark the service order as invoiced; failures in those repository operations are ignored. On error it shows a critical error dialog. The Generate button is disabled and its label changed during processing and restored when finished.
+        """
         self.btn_generate.setEnabled(False)
         self.btn_generate.setText("Generating…")
         QApplication.processEvents()

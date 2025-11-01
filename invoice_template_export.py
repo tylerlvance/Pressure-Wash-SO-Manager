@@ -416,6 +416,14 @@ def _tight_content_range(ws):
 
 
 def _ensure_dir(path: str):
+    """
+    Create the directory at path if it does not already exist.
+    
+    Does nothing when path is empty or when the directory already exists.
+    
+    Parameters:
+        path (str): Filesystem directory path to create.
+    """
     if path and not os.path.exists(path):
         os.makedirs(path, exist_ok=True)
 # coderabbit-review-marker
