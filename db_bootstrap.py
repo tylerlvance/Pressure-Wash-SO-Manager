@@ -43,3 +43,4 @@ def ensure_sqlite_columns():
 
     con.commit()
     con.close()
+# coderabbit-review-marker

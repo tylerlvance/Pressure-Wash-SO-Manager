@@ -277,3 +277,4 @@ class GenerateInvoiceDialog(QDialog):
 
         QMessageBox.information(self, "Success", f"Invoice created:\n{outpdf}")
         self.accept()
+# coderabbit-review-marker

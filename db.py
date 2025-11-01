@@ -24,3 +24,4 @@ def ensure_schema(engine):
     """Create any missing tables, then verify key columns exist."""
     Base.metadata.create_all(engine)
     ensure_service_catalog_columns(engine)
+# coderabbit-review-marker

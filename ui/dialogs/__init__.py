@@ -5,3 +5,4 @@ from .generate_invoice_dialog import GenerateInvoiceDialog
 from .details_dialog import CustomerSiteDetailsDialog   # ← add this
 
 __all__ = ["CustomerDialog", "SiteDialog", "ServiceOrderDialog", "GenerateInvoiceDialog", "CustomerSiteDetailsDialog"]
+# coderabbit-review-marker

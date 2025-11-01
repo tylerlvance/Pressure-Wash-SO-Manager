@@ -369,3 +369,4 @@ class InvoiceDialog(QDialog):
         finally:
             self.btn_generate.setEnabled(True)
             self.btn_generate.setText("Generate")
+# coderabbit-review-marker

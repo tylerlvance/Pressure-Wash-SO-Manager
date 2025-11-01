@@ -357,3 +357,4 @@ class AssignStaffDialog(QDialog):
 
         QMessageBox.information(self, "Saved", "Staff assignments updated.")
         self._populate()
+# coderabbit-review-marker

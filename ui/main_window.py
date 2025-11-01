@@ -963,3 +963,4 @@ class MainWindow(QMainWindow):
 
         dlg = CustomerSiteDetailsDialog(self, customer=customer, site=site, services=services)
         dlg.exec()
+# coderabbit-review-marker

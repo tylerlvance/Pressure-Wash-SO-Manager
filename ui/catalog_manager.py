@@ -351,3 +351,4 @@ class CatalogManagerDialog(QDialog):
             name = self.tbl.item(r, 0).text().lower() if self.tbl.item(r, 0) else ""
             desc = self.tbl.item(r, 1).text().lower() if self.tbl.item(r, 1) else ""
             self.tbl.setRowHidden(r, not (needle in name or needle in desc))
+# coderabbit-review-marker
