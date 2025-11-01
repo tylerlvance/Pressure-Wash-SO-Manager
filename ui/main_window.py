@@ -121,6 +121,37 @@ class MainWindow(QMainWindow):
         self._refresh_month()
         self._load_center_scope()  # company-wide open SOs on startup
 
+    # --- Right panel collapse/expand (single authoritative copy) ---
+    def _toggle_right_panel(self):
+        if getattr(self, "_right_collapsed", False):
+            self._expand_right_panel()
+        else:
+            self._collapse_right_panel()
+
+    def _collapse_right_panel(self):
+        try:
+            self._saved_sizes = self.splitter.sizes()
+        except Exception:
+            self._saved_sizes = None
+        self.right_panel.setVisible(False)
+        self._right_collapsed = True
+        if hasattr(self, "btn_toggle_right"):
+            self.btn_toggle_right.setText("Show Month")
+        sizes = self.splitter.sizes()
+        if len(sizes) == 3:
+            self.splitter.setSizes([sizes[0], sizes[1] + sizes[2], 0])
+
+    def _expand_right_panel(self):
+        self.right_panel.setVisible(True)
+        self._right_collapsed = False
+        if hasattr(self, "btn_toggle_right"):
+            self.btn_toggle_right.setText("Hide Month")
+        if getattr(self, "_saved_sizes", None) and len(self._saved_sizes) == 3 and self._saved_sizes[2] > 0:
+            self.splitter.setSizes(self._saved_sizes)
+        else:
+            # fallback default
+            self.splitter.setSizes([320, 820, 500])
+
     # -----------------------------
     # Helpers: prefs
     # -----------------------------
@@ -596,7 +627,7 @@ class MainWindow(QMainWindow):
         self.lbl_count.setText(str(visible if visible == total else f"{visible}/{total}"))
 
     # -----------------------------
-    # Customer / Site actions (unchanged)
+    # Customer / Site actions
     # -----------------------------
     def _manage_catalog(self):
         dlg = CatalogManagerDialog(self.session, self)
@@ -910,33 +941,6 @@ class MainWindow(QMainWindow):
         t = date.today()
         self._year, self._month = t.year, t.month
         self._refresh_month()
-    # --- Right panel collapse/expand ---
-    def _toggle_right_panel(self):
-        if self._right_collapsed:
-            self._expand_right_panel()
-        else:
-            self._collapse_right_panel()
-    
-    def _collapse_right_panel(self):
-        try:
-            self._saved_sizes = self.splitter.sizes()
-        except Exception:
-            self._saved_sizes = None
-        self.right_panel.setVisible(False)
-        self._right_collapsed = True
-        self.btn_toggle_right.setText("Show Month")
-        sizes = self.splitter.sizes()
-        if len(sizes) == 3:
-            self.splitter.setSizes([sizes[0], sizes[1] + sizes[2], 0])
-    
-    def _expand_right_panel(self):
-        self.right_panel.setVisible(True)
-        self._right_collapsed = False
-        self.btn_toggle_right.setText("Hide Month")
-        if self._saved_sizes and len(self._saved_sizes) == 3 and self._saved_sizes[2] > 0:
-            self.splitter.setSizes(self._saved_sizes)
-        else:
-            self.splitter.setSizes([320, 820, 500])
 
     # -----------------------------
     # Details popup
@@ -963,4 +967,3 @@ class MainWindow(QMainWindow):
 
         dlg = CustomerSiteDetailsDialog(self, customer=customer, site=site, services=services)
         dlg.exec()
-# coderabbit-review-marker
