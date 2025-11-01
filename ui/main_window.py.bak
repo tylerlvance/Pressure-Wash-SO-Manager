@@ -1,0 +1,938 @@
+from __future__ import annotations
+from datetime import date, datetime, timedelta
+from typing import Optional, Iterable, List
+import os
+import json
+
+from PySide6.QtCore import Qt, QSortFilterProxyModel, QRegularExpression, QModelIndex
+from PySide6.QtGui import QPixmap, QIcon, QAction
+from PySide6.QtWidgets import (
+    QWidget, QMainWindow, QSplitter, QListWidget, QListWidgetItem, QVBoxLayout, QHBoxLayout,
+    QPushButton, QLabel, QMessageBox, QButtonGroup, QFrame, QLineEdit, QComboBox, QCheckBox
+)
+
+from sqlalchemy.orm import Session
+from sqlalchemy import select
+from repository import Repo
+from models import Customer, Site, ServiceOrder
+from .dialogs import CustomerDialog, SiteDialog, ServiceOrderDialog, CustomerSiteDetailsDialog
+from .widgets import SoTable, SoTableModel
+from ui.invoice_dialog import InvoiceDialog
+# Staff dialogs
+from .employee_dialogs import EmployeeManagerDialog, AssignStaffDialog
+# Catalog Manager dialog (expects a SQLAlchemy Session)
+from .catalog_manager import CatalogManagerDialog
+
+NAVY = "#0B2A45"
+WHITE = "#FFFFFF"
+ACCENT = "#D34A36"
+
+UIPREFS_PATH = os.path.join(os.path.dirname(os.path.dirname(__file__)), "data", "ui_prefs.json")
+
+
+def _find_logo_path() -> str | None:
+    here = os.path.dirname(__file__)
+    root = os.path.abspath(os.path.join(here, ".."))
+    for p in [
+        os.path.join(root, "3a7e79be-0c84-4bc3-8444-a4753cd60b1e.png"),
+        os.path.join(root, "logo.png"),
+        os.path.join(root, "assets", "logo.png"),
+    ]:
+        if os.path.exists(p):
+            return p
+    return None
+
+
+# -----------------------------
+# Smart filter proxy for SO list
+# -----------------------------
+class _SoFilterProxy(QSortFilterProxyModel):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._status = "All"  # All, Open, Completed, Invoiced
+        self._text = ""
+        self.setFilterCaseSensitivity(Qt.CaseInsensitive)
+        self.setFilterKeyColumn(-1)
+
+    def set_status(self, status: str):
+        self._status = status or "All"
+        self.invalidateFilter()
+
+    def set_text(self, text: str):
+        self._text = text or ""
+        rx = QRegularExpression(QRegularExpression.escape(self._text), QRegularExpression.CaseInsensitiveOption)
+        self.setFilterRegularExpression(rx)
+        self.invalidateFilter()
+
+    def filterAcceptsRow(self, source_row: int, source_parent: QModelIndex) -> bool:
+        if not super().filterAcceptsRow(source_row, source_parent):
+            return False
+
+        if self._status == "All":
+            return True
+
+        sm = self.sourceModel()
+        try:
+            so = sm.rows[source_row]
+        except Exception:
+            return True
+
+        if self._status == "Open":
+            return not getattr(so, "completed", False) and not getattr(so, "invoiced", False)
+        if self._status == "Completed":
+            return bool(getattr(so, "completed", False))
+        if self._status == "Invoiced":
+            return bool(getattr(so, "invoiced", False))
+        return True
+
+
+class MainWindow(QMainWindow):
+    def __init__(self, SessionLocal):
+        super().__init__()
+        self.SessionLocal = SessionLocal
+        self.session: Session = SessionLocal()
+        self.repo = Repo(self.session)
+
+        self.setWindowTitle("Founders PW - SO Manager")
+        logo_path = _find_logo_path()
+        if logo_path:
+            self.setWindowIcon(QIcon(logo_path))
+
+        today = date.today()
+        self._year = today.year
+        self._month = today.month
+
+        # month filter: 0=all, 1=today, 2=overdue
+        self._month_filter = 0
+
+        self._right_collapsed = False
+        self._saved_sizes: list[int] | None = None
+        self._so_sel_connected = False
+
+        self._ui_prefs = self._load_ui_prefs()
+
+        self._build_ui(logo_path)
+        self._restore_filter_prefs()
+        # Make sure center starts "Open"
+        if self.cmb_status.currentText() != "Open":
+            self.cmb_status.setCurrentText("Open")
+        # Initial data
+        self._refresh_customers()
+        self._refresh_month()
+        self._load_center_scope()  # company-wide open SOs on startup
+
+    # -----------------------------
+    # Helpers: prefs
+    # -----------------------------
+    def _load_ui_prefs(self) -> dict:
+        try:
+            with open(UIPREFS_PATH, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception:
+            return {}
+
+    def _save_ui_prefs(self):
+        try:
+            os.makedirs(os.path.dirname(UIPREFS_PATH), exist_ok=True)
+            with open(UIPREFS_PATH, "w", encoding="utf-8") as f:
+                json.dump(self._ui_prefs, f, indent=2)
+        except Exception:
+            pass
+
+    def _set_pref(self, section: str, key: str, value):
+        self._ui_prefs.setdefault(section, {})
+        self._ui_prefs[section][key] = value
+        self._save_ui_prefs()
+
+    def _get_pref(self, section: str, key: str, default=None):
+        return self._ui_prefs.get(section, {}).get(key, default)
+
+    def _persist_sos_column_widths(self):
+        header = self.table_site_sos.horizontalHeader()
+        widths = [header.sectionSize(i) for i in range(header.count())]
+        self._set_pref("sos_panel", "column_widths", widths)
+
+    def _restore_sos_column_widths(self):
+        try:
+            widths = self._get_pref("sos_panel", "column_widths", [])
+            header = self.table_site_sos.horizontalHeader()
+            for i, w in enumerate(widths):
+                if i < header.count() and w > 10:
+                    header.resizeSection(i, int(w))
+        except Exception:
+            pass
+
+    def _restore_filter_prefs(self):
+        # Center panel defaults to Open
+        saved_status = self._get_pref("sos_panel", "filter_status", None)
+        if saved_status is None:
+            self._set_pref("sos_panel", "filter_status", "Open")
+            self.cmb_status.setCurrentText("Open")
+        else:
+            self.cmb_status.setCurrentText(saved_status if saved_status in ["All", "Open", "Completed", "Invoiced"] else "Open")
+        self.txt_search.setText(self._get_pref("sos_panel", "search_text", ""))
+
+        # Right panel defaults: Open only checked
+        self._month_filter = int(self._get_pref("month_panel", "filter_mode", 0) or 0)
+        if self._month_filter == 0:
+            self.filter_all.setChecked(True)
+        elif self._month_filter == 1:
+            self.filter_today.setChecked(True)
+        else:
+            self.filter_overdue.setChecked(True)
+        open_only_pref = self._get_pref("month_panel", "open_only", None)
+        if open_only_pref is None:
+            self._set_pref("month_panel", "open_only", True)
+            self.chk_month_open_only.setChecked(True)
+        else:
+            self.chk_month_open_only.setChecked(bool(open_only_pref))
+
+    # -----------------------------
+    # Helpers: data queries + sorting
+    # -----------------------------
+    def _sort_by_date_asc(self, rows: Iterable[ServiceOrder]) -> List[ServiceOrder]:
+        def keyfn(r: ServiceOrder):
+            d = getattr(r, "scheduled_date", None)
+            return (d is None, d)
+        return sorted(list(rows), key=keyfn)
+
+    def _open_filter(self, rows: Iterable[ServiceOrder]) -> List[ServiceOrder]:
+        return [r for r in rows if not getattr(r, "completed", False) and not getattr(r, "invoiced", False)]
+
+    def _query_all_sos(self) -> List[ServiceOrder]:
+        # Generic all-SO query ordered in Python later
+        stmt = select(ServiceOrder).join(Site, ServiceOrder.site_id == Site.id)
+        return [r[0] for r in self.session.execute(stmt).all()]
+
+    def _query_open_company(self) -> List[ServiceOrder]:
+        try:
+            if hasattr(self.repo, "list_all_sos"):
+                rows = self.repo.list_all_sos()
+            else:
+                rows = self._query_all_sos()
+        except Exception:
+            rows = []
+        return self._sort_by_date_asc(self._open_filter(rows))
+
+    def _query_open_for_customer(self, customer_id: int) -> List[ServiceOrder]:
+        try:
+            if hasattr(self.repo, "list_sos_for_customer"):
+                rows = self.repo.list_sos_for_customer(customer_id)
+            else:
+                stmt = select(ServiceOrder).join(Site, ServiceOrder.site_id == Site.id).where(Site.customer_id == customer_id)
+                rows = [r[0] for r in self.session.execute(stmt).all()]
+        except Exception:
+            rows = []
+        return self._sort_by_date_asc(self._open_filter(rows))
+
+    def _query_open_for_site(self, site_id: int) -> List[ServiceOrder]:
+        try:
+            rows = self.repo.list_sos_for_site(site_id)
+        except Exception:
+            rows = []
+        return self._sort_by_date_asc(self._open_filter(rows))
+
+    def _load_center_scope(self):
+        """Company-wide open SOs by default, then narrow when a customer/site is selected."""
+        site_item = self.list_sites.currentItem()
+        cust_item = self.list_customers.currentItem()
+
+        if site_item:
+            sid = site_item.data(Qt.UserRole)
+            rows = self._query_open_for_site(sid)
+        elif cust_item:
+            cid = cust_item.data(Qt.UserRole)
+            rows = self._query_open_for_customer(cid)
+        else:
+            rows = self._query_open_company()
+
+        self._set_center_model(SoTableModel(rows))
+        try:
+            self.table_site_sos.setSortingEnabled(True)
+            # Scheduled column should be index 0 in SoTableModel
+            self.table_site_sos.sortByColumn(0, Qt.AscendingOrder)
+        except Exception:
+            pass
+
+    # -----------------------------
+    # Refresh helpers
+    # -----------------------------
+    def _refresh_customers(self):
+        self.list_customers.clear()
+        for c in self.repo.list_customers():
+            item = QListWidgetItem(c.name)
+            item.setData(Qt.UserRole, c.id)
+            self.list_customers.addItem(item)
+
+    def _refresh_sites(self, customer_id: Optional[int]):
+        self.list_sites.clear()
+        self._set_center_model(SoTableModel([]))
+        self._update_invoice_actions_state()
+        if not customer_id:
+            return
+        for s in self.repo.list_sites_for_customer(customer_id):
+            item = QListWidgetItem(s.name)
+            item.setData(Qt.UserRole, s.id)
+            self.list_sites.addItem(item)
+
+    def _filtered_month_rows(self):
+        rows = self.repo.list_sos_due_in_month(self._year, self._month)
+        if self._month_filter == 1:
+            today = date.today()
+            rows = [r for r in rows if (r.scheduled_date == today and not r.completed)]
+        elif self._month_filter == 2:
+            today = date.today()
+            rows = [r for r in rows if (r.scheduled_date is not None and r.scheduled_date < today and not r.completed)]
+        # Apply "open only" if checked
+        if self.chk_month_open_only.isChecked():
+            rows = [r for r in rows if not r.completed and not getattr(r, "invoiced", False)]
+        return rows
+
+    def _refresh_month(self):
+        self.lbl_month.setText(f"{self._year}-{self._month:02d}")
+        self.table_month.setModel(SoTableModel(self._filtered_month_rows()))
+
+    # -----------------------------
+    # UI construction
+    # -----------------------------
+    def _build_ui(self, logo_path: str | None):
+        root = QWidget()
+        root_lay = QVBoxLayout(root)
+        root_lay.setContentsMargins(0, 0, 0, 0)
+        root_lay.setSpacing(0)
+
+        header = QWidget()
+        header.setObjectName("header")
+        header_lay = QHBoxLayout(header)
+        header_lay.setContentsMargins(12, 6, 12, 6)
+        header_lay.setSpacing(10)
+
+        if logo_path:
+            logo_lbl = QLabel()
+            pm = QPixmap(logo_path)
+            if not pm.isNull():
+                pm = pm.scaledToHeight(44, Qt.SmoothTransformation)
+                logo_lbl.setPixmap(pm)
+                logo_lbl.setFixedHeight(44)
+                header_lay.addWidget(logo_lbl)
+
+        title = QLabel("Founders Pressure Wash Co")
+        title.setObjectName("hdrTitle")
+        header_lay.addWidget(title)
+        ver = QLabel("SO Manager MVP")
+        ver.setObjectName("hdrRight")
+        header_lay.addWidget(ver)
+
+        header_lay.addStretch(1)
+
+        self.btn_manage_catalog_hdr = QPushButton("Manage Catalog")
+        self.btn_manage_staff_hdr = QPushButton("Manage Staff")
+        self.btn_toggle_right = QPushButton("Hide Month")
+        for b in (self.btn_manage_catalog_hdr, self.btn_manage_staff_hdr, self.btn_toggle_right):
+            b.setCursor(Qt.PointingHandCursor)
+            header_lay.addWidget(b)
+
+        header.setStyleSheet(f"""
+        #header {{ background: {NAVY}; border-bottom: 2px solid {ACCENT}; }}
+        #hdrTitle {{ color: {WHITE}; font-size: 18px; font-weight: 600; }}
+        #hdrRight {{ color: {WHITE}; font-size: 12px; opacity: 0.9; margin-left: 12px; }}
+        QPushButton {{
+            background-color: {ACCENT};
+            color: {WHITE};
+            border: none;
+            padding: 6px 10px;
+            border-radius: 4px;
+        }}
+        QPushButton:hover {{ background-color: #b33b2a; }}
+        """)
+
+        self.splitter = QSplitter(Qt.Horizontal)
+        self.splitter.setChildrenCollapsible(True)
+
+        # Left
+        left = QWidget()
+        left_lay = QVBoxLayout(left)
+        left_lay.setContentsMargins(8, 8, 8, 8)
+
+        self.btn_details = QPushButton("Details")
+        self.btn_details.setToolTip("View selected Customer or Customer + Site")
+        self.btn_details.clicked.connect(self._show_details)
+
+        self.div_details = QFrame()
+        self.div_details.setFrameShape(QFrame.HLine)
+        self.div_details.setFrameShadow(QFrame.Sunken)
+        self.div_details.setStyleSheet("color: #bbbbbb;")
+
+        self.btn_add_customer = QPushButton("+ Customer")
+        self.btn_del_customer = QPushButton("- Delete Customer")
+        self.btn_add_site = QPushButton("+ Site")
+        self.btn_del_site = QPushButton("- Delete Site")
+        self.list_customers = QListWidget()
+        self.list_sites = QListWidget()
+
+        left_lay.addWidget(self.btn_details)
+        left_lay.addWidget(self.div_details)
+        left_lay.addWidget(self.btn_add_customer)
+        left_lay.addWidget(self.btn_del_customer)
+        left_lay.addWidget(QLabel("Customers"))
+        left_lay.addWidget(self.list_customers, 1)
+        left_lay.addWidget(self.btn_add_site)
+        left_lay.addWidget(self.btn_del_site)
+        left_lay.addWidget(QLabel("Sites"))
+        left_lay.addWidget(self.list_sites, 1)
+
+        # Center
+        center = QWidget()
+        center_lay = QVBoxLayout(center)
+        center_lay.setContentsMargins(8, 8, 8, 8)
+        center_lay.setSpacing(8)
+
+        self.btn_add_so = QPushButton("+ Service Order")
+        self.btn_del_so = QPushButton("- Delete SO")
+        self.btn_assign_staff = QPushButton("Assign Staff")
+        self.btn_mark_done = QPushButton("Mark Completed")
+        self.btn_generate_invoice = QPushButton("Generate Invoice")
+        self.btn_mark_inv = QPushButton("Mark Invoiced")
+
+        card_hdr = QWidget()
+        ch = QHBoxLayout(card_hdr)
+        ch.setContentsMargins(10, 8, 10, 8)
+        ch.setSpacing(8)
+
+        self.lbl_center_title = QLabel("Service Orders")
+        self.lbl_center_title.setObjectName("centerTitle")
+        self.lbl_count = QLabel("")
+        self.lbl_count.setObjectName("countPill")
+        self.lbl_count.setStyleSheet("#countPill { background:#eef5ff; color:#1b4b91; border:1px solid #cfe0ff; border-radius:10px; padding:2px 6px; }")
+
+        ch.addWidget(self.lbl_center_title); ch.addWidget(self.lbl_count); ch.addStretch(1)
+
+        self.cmb_status = QComboBox(); self.cmb_status.addItems(["All", "Open", "Completed", "Invoiced"])
+        self.cmb_status.setToolTip("Filter by status")
+
+        self.txt_search = QLineEdit(); self.txt_search.setPlaceholderText("Search orders…")
+        self.txt_search.setClearButtonEnabled(True); self.txt_search.setFixedWidth(220)
+
+        ch.addWidget(self.cmb_status); ch.addWidget(self.txt_search)
+
+        bar = QWidget()
+        bar_lay = QHBoxLayout(bar); bar_lay.setContentsMargins(10, 0, 10, 0); bar_lay.setSpacing(6)
+        bar_lay.addWidget(self.btn_add_so); bar_lay.addWidget(self.btn_del_so)
+        bar_lay.addStretch(1)
+        for b in (self.btn_assign_staff, self.btn_mark_done, self.btn_generate_invoice, self.btn_mark_inv):
+            bar_lay.addWidget(b)
+
+        self.table_site_sos = SoTable()
+        self.table_site_sos.doubleClicked.connect(self._edit_selected_so)
+        self.table_site_sos.setContextMenuPolicy(Qt.ActionsContextMenu)
+        self.act_generate_invoice = QAction("Generate Invoice", self)
+        self.act_generate_invoice.triggered.connect(self._generate_invoice)
+        self.table_site_sos.addAction(self.act_generate_invoice)
+        self.btn_generate_invoice.setEnabled(False); self.act_generate_invoice.setEnabled(False)
+
+        center_lay.addWidget(card_hdr)
+        center_lay.addWidget(bar)
+        center_lay.addWidget(self.table_site_sos, 1)
+
+        # Right
+        self.right_panel = QWidget()
+        right_lay = QVBoxLayout(self.right_panel)
+        right_lay.setContentsMargins(8, 8, 8, 8)
+
+        nav_row = QHBoxLayout()
+        self.btn_prev = QPushButton("<"); self.btn_this = QPushButton("This Month"); self.btn_next = QPushButton(">")
+        self.lbl_month = QLabel(""); self.lbl_month.setObjectName("monthLbl")
+        nav_row.addWidget(QLabel("Due This Month")); nav_row.addStretch(1)
+        nav_row.addWidget(self.btn_prev); nav_row.addWidget(self.btn_this); nav_row.addWidget(self.btn_next); nav_row.addWidget(self.lbl_month)
+
+        filter_row = QHBoxLayout()
+        filter_row.addWidget(QLabel("Filter:"))
+        self.filter_all = QPushButton("All"); self.filter_today = QPushButton("Today"); self.filter_overdue = QPushButton("Overdue")
+        for b in (self.filter_all, self.filter_today, self.filter_overdue):
+            b.setCheckable(True); filter_row.addWidget(b)
+        filter_row.addStretch(1)
+        self.chk_month_open_only = QCheckBox("Open only")
+        filter_row.addWidget(self.chk_month_open_only)
+
+        self.filter_group = QButtonGroup(self)
+        self.filter_group.addButton(self.filter_all, 0)
+        self.filter_group.addButton(self.filter_today, 1)
+        self.filter_group.addButton(self.filter_overdue, 2)
+        self.filter_all.setChecked(True)
+
+        self.table_month = SoTable()
+        right_lay.addLayout(nav_row); right_lay.addLayout(filter_row); right_lay.addWidget(self.table_month, 1)
+
+        self.splitter.addWidget(left); self.splitter.addWidget(center); self.splitter.addWidget(self.right_panel)
+        self.splitter.setSizes([320, 820, 500])
+
+        root_lay.addWidget(header); root_lay.addWidget(self.splitter, 1)
+        self.setCentralWidget(root)
+        header.setStyleSheet(header.styleSheet() + "\n#monthLbl { color: %s; font-weight: 600; }" % WHITE)
+
+        # Signals
+        self.btn_manage_catalog_hdr.clicked.connect(self._manage_catalog)
+        self.btn_manage_staff_hdr.clicked.connect(self._manage_staff)
+        self.btn_add_customer.clicked.connect(self._add_customer)
+        self.btn_del_customer.clicked.connect(self._del_customer)
+        self.btn_add_site.clicked.connect(self._add_site)
+        self.btn_del_site.clicked.connect(self._del_site)
+        self.btn_add_so.clicked.connect(self._add_so)
+        self.btn_del_so.clicked.connect(self._del_so)
+
+        self.btn_assign_staff.clicked.connect(self._assign_staff)
+        self.btn_mark_done.clicked.connect(lambda: self._flag_selected_so(done=True))
+        self.btn_generate_invoice.clicked.connect(self._generate_invoice)
+        self.btn_mark_inv.clicked.connect(lambda: self._flag_selected_so(inv=True))
+
+        self.list_customers.currentItemChanged.connect(self._on_customer_changed)
+        self.list_customers.itemDoubleClicked.connect(self._edit_customer)
+        self.list_sites.currentItemChanged.connect(self._on_site_changed)
+        self.list_sites.itemDoubleClicked.connect(self._edit_site)
+        self.btn_prev.clicked.connect(self._goto_prev_month)
+        self.btn_next.clicked.connect(self._goto_next_month)
+        self.btn_this.clicked.connect(self._goto_this_month)
+        self.filter_group.buttonClicked.connect(lambda btn: self._set_month_filter(self.filter_group.id(btn)))
+        self.btn_toggle_right.clicked.connect(self._toggle_right_panel)
+        self.chk_month_open_only.toggled.connect(self._on_month_open_only_toggled)
+
+        self.cmb_status.currentTextChanged.connect(self._on_status_changed)
+        self.txt_search.textChanged.connect(self._on_search_changed)
+
+        center.setStyleSheet("""
+            #centerTitle { font-size: 14px; font-weight: 600; }
+            SoTable::item { padding: 6px; }
+        """)
+
+    # -----------------------------
+    # Selection wiring + actions
+    # -----------------------------
+    def _wire_so_selection_signals(self):
+        self._so_sel_connected = False
+        sel = self.table_site_sos.selectionModel()
+        if sel:
+            sel.selectionChanged.connect(self._update_invoice_actions_state)
+            self._so_sel_connected = True
+
+    def _map_to_source(self, proxy_index: QModelIndex) -> QModelIndex:
+        if isinstance(self.table_site_sos.model(), QSortFilterProxyModel):
+            return self.table_site_sos.model().mapToSource(proxy_index)
+        return proxy_index
+
+    def _current_selected_so(self) -> Optional[ServiceOrder]:
+        model = self.table_site_sos.model()
+        sel_model = self.table_site_sos.selectionModel()
+        if not sel_model or not hasattr(model, "rowCount"):
+            return None
+        indexes = sel_model.selectedRows()
+        if not indexes:
+            return None
+        src_index = self._map_to_source(indexes[0])
+        try:
+            src_model: SoTableModel = self.proxy_site.sourceModel()
+            return src_model.rows[src_index.row()]
+        except Exception:
+            return None
+
+    def _update_invoice_actions_state(self):
+        so = self._current_selected_so()
+        can_generate = bool(so and getattr(so, "completed", False))
+        self.btn_generate_invoice.setEnabled(can_generate)
+        self.act_generate_invoice.setEnabled(can_generate)
+
+    # -----------------------------
+    # Filtering + persistence
+    # -----------------------------
+    def _set_month_filter(self, which: int):
+        self._month_filter = which
+        self.filter_all.setChecked(which == 0)
+        self.filter_today.setChecked(which == 1)
+        self.filter_overdue.setChecked(which == 2)
+        self._set_pref("month_panel", "filter_mode", which)
+        self._refresh_month()
+
+    def _on_month_open_only_toggled(self, checked: bool):
+        self._set_pref("month_panel", "open_only", bool(checked))
+        self._refresh_month()
+
+    def _on_status_changed(self, text: str):
+        if hasattr(self, "proxy_site"):
+            self.proxy_site.set_status(text)
+            self._update_center_count()
+        self._set_pref("sos_panel", "filter_status", text)
+
+    def _on_search_changed(self, text: str):
+        if hasattr(self, "proxy_site"):
+            self.proxy_site.set_text(text)
+            self._update_center_count()
+        self._set_pref("sos_panel", "search_text", text)
+
+    # -----------------------------
+    # Center model wiring
+    # -----------------------------
+    def _set_center_model(self, model: SoTableModel):
+        self.proxy_site = _SoFilterProxy(self)
+        self.proxy_site.setSourceModel(model)
+        # Re-apply current filters so switching scope does not reset
+        try:
+            self.proxy_site.set_status(self.cmb_status.currentText())
+            self.proxy_site.set_text(self.txt_search.text())
+        except Exception:
+            pass
+        self.table_site_sos.setModel(self.proxy_site)
+        self._update_center_count()
+        self._wire_so_selection_signals()
+        self._restore_sos_column_widths()
+        try:
+            self.table_site_sos.horizontalHeader().sectionResized.disconnect()
+        except Exception:
+            pass
+        self.table_site_sos.horizontalHeader().sectionResized.connect(lambda *_: self._persist_sos_column_widths())
+
+    def _update_center_count(self):
+        src: SoTableModel = self.proxy_site.sourceModel() if hasattr(self, "proxy_site") else None
+        total = len(getattr(src, "rows", [])) if src else 0
+        visible = self.proxy_site.rowCount() if hasattr(self, "proxy_site") else 0
+        self.lbl_count.setText(str(visible if visible == total else f"{visible}/{total}"))
+
+    # -----------------------------
+    # Customer / Site actions (unchanged)
+    # -----------------------------
+    def _manage_catalog(self):
+        dlg = CatalogManagerDialog(self.session, self)
+        dlg.exec()
+
+    def _add_customer(self):
+        dlg = CustomerDialog(self, repo=self.repo)
+        if dlg.exec():
+            vals = dlg.values()
+            name = (vals.get("name") or "").strip()
+            if not name:
+                QMessageBox.warning(self, "Missing", "Customer name is required")
+                return
+            cust_fields = dict(
+                name=name,
+                phone=(vals.get("phone") or "").strip(),
+                email=(vals.get("email") or "").strip(),
+                notes=(vals.get("notes") or "").strip(),
+            )
+            c = self.repo.create_customer(**cust_fields)
+            pp = vals.get("payment_profile") or {}
+            method = (pp.get("method") or "other").lower()
+            if method != "other":
+                prof = self.repo.create_payment_profile(
+                    customer_id=c.id,
+                    method=method,
+                    ach_routing=pp.get("ach_routing", ""),
+                    ach_account=pp.get("ach_account", ""),
+                    card_brand=pp.get("card_brand", ""),
+                    card_last4=pp.get("card_last4", ""),
+                    card_name=pp.get("card_name", ""),
+                    card_exp_month=pp.get("card_exp_month", 0),
+                    card_exp_year=pp.get("card_exp_year", 0),
+                    bill_street=pp.get("bill_street", ""),
+                    bill_city_state_zip=pp.get("bill_city_state_zip", ""),
+                    is_default=bool(pp.get("is_default", True)),
+                )
+                if pp.get("is_default", True):
+                    self.repo.set_default_payment_profile(c.id, prof.id)
+            self._refresh_customers()
+            self._load_center_scope()
+
+    def _edit_customer(self, item: QListWidgetItem):
+        cid = item.data(Qt.UserRole)
+        cust = self.session.get(Customer, cid)
+        dlg = CustomerDialog(self, obj=cust, repo=self.repo)
+        if dlg.exec():
+            vals = dlg.values()
+            cust_fields = dict(
+                name=(vals.get("name") or cust.name or "").strip(),
+                phone=(vals.get("phone") or cust.phone or "").strip(),
+                email=(vals.get("email") or cust.email or "").strip(),
+                notes=(vals.get("notes") or cust.notes or "").strip(),
+            )
+            self.repo.update_customer(cid, **cust_fields)
+            pp = vals.get("payment_profile") or {}
+            method = (pp.get("method") or "other").lower()
+            if method != "other":
+                prof = self.repo.create_payment_profile(
+                    customer_id=cid,
+                    method=method,
+                    ach_routing=pp.get("ach_routing", ""),
+                    ach_account=pp.get("ach_account", ""),
+                    card_brand=pp.get("card_brand", ""),
+                    card_last4=pp.get("card_last4", ""),
+                    card_name=pp.get("card_name", ""),
+                    card_exp_month=pp.get("card_exp_month", 0),
+                    card_exp_year=pp.get("card_exp_year", 0),
+                    bill_street=pp.get("bill_street", ""),
+                    bill_city_state_zip=pp.get("bill_city_state_zip", ""),
+                    is_default=bool(pp.get("is_default", True)),
+                )
+                if pp.get("is_default", True):
+                    self.repo.set_default_payment_profile(cid, prof.id)
+            self._refresh_customers()
+            self._load_center_scope()
+
+    def _del_customer(self):
+        cur = self.list_customers.currentItem()
+        if not cur:
+            QMessageBox.information(self, "Select", "Select a customer first")
+            return
+        name = cur.text()
+        cid = cur.data(Qt.UserRole)
+        ok = QMessageBox.question(self, "Confirm", f"Delete customer '{name}' and all sites/orders?",
+                                  QMessageBox.Yes | QMessageBox.No)
+        if ok == QMessageBox.Yes:
+            self.repo.delete_customer(cid)
+            self._refresh_customers()
+            self.list_sites.clear()
+            self._set_center_model(SoTableModel([]))
+            self._update_invoice_actions_state()
+            self._load_center_scope()
+
+    def _refresh_sites(self, customer_id: Optional[int]):
+        self.list_sites.clear()
+        self._set_center_model(SoTableModel([]))
+        self._update_invoice_actions_state()
+        if not customer_id:
+            return
+        for s in self.repo.list_sites_for_customer(customer_id):
+            item = QListWidgetItem(s.name)
+            item.setData(Qt.UserRole, s.id)
+            self.list_sites.addItem(item)
+
+    def _on_customer_changed(self, cur, prev):
+        cid = cur.data(Qt.UserRole) if cur else None
+        self._refresh_sites(cid)
+        self._load_center_scope()
+
+    def _on_site_changed(self, cur, prev):
+        self._load_center_scope()
+
+    # -----------------------------
+    # Service order actions
+    # -----------------------------
+    def _add_site(self):
+        cur_c = self.list_customers.currentItem()
+        if not cur_c:
+            QMessageBox.information(self, "Select Customer", "Pick a customer first")
+            return
+        cid = cur_c.data(Qt.UserRole)
+        dlg = SiteDialog(self, customer_name=cur_c.text())
+        if dlg.exec():
+            vals = dlg.values()
+            vals["customer_id"] = cid
+            if not vals.get("name"):
+                QMessageBox.warning(self, "Missing", "Site name is required")
+                return
+            self.repo.create_site(**vals)
+            self._refresh_sites(cid)
+            self._load_center_scope()
+
+    def _edit_site(self, item: QListWidgetItem):
+        sid = item.data(Qt.UserRole)
+        site = self.session.get(Site, sid)
+        cust_item = self.list_customers.currentItem()
+        dlg = SiteDialog(self, customer_name=cust_item.text() if cust_item else "", obj=site)
+        if dlg.exec():
+            vals = dlg.values()
+            self.repo.update_site(sid, **vals)
+            self._refresh_sites(site.customer_id)
+            self._load_center_scope()
+
+    def _del_site(self):
+        cur = self.list_sites.currentItem()
+        if not cur:
+            QMessageBox.information(self, "Select", "Select a site first")
+            return
+        name = cur.text()
+        sid = cur.data(Qt.UserRole)
+        ok = QMessageBox.question(
+            self, "Confirm", f"Delete site '{name}' and all its service orders?",
+            QMessageBox.Yes | QMessageBox.No
+        )
+        if ok == QMessageBox.Yes:
+            self.repo.delete_site(sid)
+            cust_item = self.list_customers.currentItem()
+            cid = cust_item.data(Qt.UserRole) if cust_item else None
+            self._refresh_sites(cid)
+            self._set_center_model(SoTableModel([]))
+            self._update_invoice_actions_state()
+            self._load_center_scope()
+
+    def _add_so(self):
+        cur_s = self.list_sites.currentItem()
+        if not cur_s:
+            QMessageBox.information(self, "Select Site", "Pick a site first")
+            return
+        sid = cur_s.data(Qt.UserRole)
+
+        site = self.repo.get_site(sid)
+        if site and (site.cadence_text or "").strip():
+            so = self.repo.create_next_so_for_site(sid)
+            QMessageBox.information(self, "Service Order Created",
+                                    f"Created: {so.title}\nScheduled: {so.scheduled_date}")
+            self._load_center_scope()
+            self._refresh_month()
+            return
+
+        try:
+            dlg = ServiceOrderDialog(self, site_name=cur_s.text(), repo=self.repo)
+        except TypeError:
+            last_date = self.repo.last_scheduled_for_site(sid)
+            dlg = ServiceOrderDialog(self, site_name=cur_s.text(), last_site_date=last_date, repo=self.repo)
+        if dlg.exec():
+            vals = dlg.values()
+            vals["site_id"] = sid
+            self.repo.create_so(**vals)
+            self._load_center_scope()
+            self._refresh_month()
+
+    def _edit_selected_so(self, index):
+        src_index = self._map_to_source(index)
+        src_model: SoTableModel = self.proxy_site.sourceModel()
+        so = src_model.rows[src_index.row()]
+        dlg = ServiceOrderDialog(self, site_name=so.site.name if so.site else "", obj=so, repo=self.repo)
+        if dlg.exec():
+            vals = dlg.values()
+            self.repo.update_so(so.id, **vals)
+            self._load_center_scope()
+            self._refresh_month()
+
+    def _del_so(self):
+        sel = self.table_site_sos.selectionModel().selectedRows()
+        if not sel:
+            QMessageBox.information(self, "Select SO", "Choose a row first")
+            return
+        src_index = self._map_to_source(sel[0])
+        src_model: SoTableModel = self.proxy_site.sourceModel()
+        so = src_model.rows[src_index.row()]
+        ok = QMessageBox.question(
+            self, "Confirm", f"Delete service order '{so.title}'?",
+            QMessageBox.Yes | QMessageBox.No
+        )
+        if ok == QMessageBox.Yes:
+            self.repo.delete_so(so.id)
+            self._load_center_scope()
+            self._refresh_month()
+
+    def _generate_invoice(self):
+        sel = self.table_site_sos.selectionModel().selectedRows()
+        if not sel:
+            QMessageBox.information(self, "Select SO", "Choose a Service Order in the middle table first.")
+            return
+        src_index = self._map_to_source(sel[0])
+        src_model: SoTableModel = self.proxy_site.sourceModel()
+        so = src_model.rows[src_index.row()]
+        if not so.completed:
+            QMessageBox.information(self, "Not Completed", "Mark the Service Order as Completed before generating an invoice.")
+            return
+        dlg = InvoiceDialog(self, repo=self.repo, so_id=so.id)
+        dlg.exec()
+        self._load_center_scope()
+        self._update_invoice_actions_state()
+        self._refresh_month()
+
+    def _assign_staff(self):
+        sel = self.table_site_sos.selectionModel().selectedRows()
+        if not sel:
+            QMessageBox.information(self, "Select SO", "Choose a Service Order in the middle table first.")
+            return
+        src_index = self._map_to_source(sel[0])
+        src_model: SoTableModel = self.proxy_site.sourceModel()
+        so = src_model.rows[src_index.row()]
+        dlg = AssignStaffDialog(self, repo=self.repo, so_id=so.id)
+        dlg.exec()
+
+    def _manage_staff(self):
+        dlg = EmployeeManagerDialog(self, repo=self.repo)
+        dlg.exec()
+
+    # -----------------------------
+    # Flags & month navigation
+    # -----------------------------
+    def _flag_selected_so(self, done: bool | None = None, inv: bool | None = None):
+        sel = self.table_site_sos.selectionModel().selectedRows()
+        if not sel:
+            QMessageBox.information(self, "Select SO", "Choose a row in the site SO table")
+            return
+        src_index = self._map_to_source(sel[0])
+        src_model: SoTableModel = self.proxy_site.sourceModel()
+        so = src_model.rows[src_index.row()]
+
+        if hasattr(self.repo, "set_so_flags"):
+            try:
+                self.repo.set_so_flags(
+                    so.id,
+                    completed=(done if done is not None else None),
+                    invoiced=(inv if inv is not None else None)
+                )
+            except Exception as e:
+                QMessageBox.critical(self, "Update failed", f"Could not update flags for SO #{so.id}\n\n{e}")
+                return
+        else:
+            try:
+                db_so = self.repo.s.get(ServiceOrder, so.id)
+                if db_so is None:
+                    raise ValueError(f"ServiceOrder {so.id} not found")
+                if done is not None:
+                    db_so.completed = bool(done)
+                    if hasattr(db_so, "completed_at") and done is True:
+                        db_so.completed_at = datetime.now()
+                if inv is not None:
+                    db_so.invoiced = bool(inv)
+                self.repo.s.flush()
+                self.repo.s.commit()
+            except Exception as e:
+                try:
+                    self.repo.s.rollback()
+                except Exception:
+                    pass
+                QMessageBox.critical(self, "Update failed", f"Could not update flags for SO #{so.id}\n\n{e}")
+                return
+
+        self._load_center_scope()
+        self._refresh_month()
+        self._update_invoice_actions_state()
+
+    def _goto_prev_month(self):
+        y, m = self._year, self._month
+        self._year, self._month = (y - 1, 12) if m == 1 else (y, m - 1)
+        self._refresh_month()
+
+    def _goto_next_month(self):
+        y, m = self._year, self._month
+        self._year, self._month = (y + 1, 1) if m == 12 else (y, m + 1)
+        self._refresh_month()
+
+    def _goto_this_month(self):
+        t = date.today()
+        self._year, self._month = t.year, t.month
+        self._refresh_month()
+
+    # -----------------------------
+    # Details popup
+    # -----------------------------
+    def _show_details(self):
+        cust_item = self.list_customers.currentItem()
+        if not cust_item:
+            QMessageBox.information(self, "Details", "Please select a customer.")
+            return
+
+        cid = cust_item.data(Qt.UserRole)
+        customer = self.session.get(Customer, int(cid)) if cid is not None else None
+
+        site_item = self.list_sites.currentItem()
+        site = None
+        services = None
+        if site_item:
+            sid = site_item.data(Qt.UserRole)
+            site = self.session.get(Site, int(sid)) if sid is not None else None
+            try:
+                services = self.repo.list_services_for_site(int(sid))
+            except Exception:
+                services = None
+
+        dlg = CustomerSiteDetailsDialog(self, customer=customer, site=site, services=services)
+        dlg.exec()

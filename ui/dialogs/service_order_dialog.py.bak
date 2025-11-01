@@ -1,0 +1,111 @@
+from __future__ import annotations
+
+from PySide6.QtCore import QDate, Qt
+from PySide6.QtWidgets import (
+    QDialog, QVBoxLayout, QHBoxLayout, QFormLayout, QLineEdit, QTextEdit,
+    QPushButton, QDateEdit, QCheckBox, QGroupBox, QTableWidget, QTableWidgetItem,
+    QAbstractItemView
+)
+
+from .common import _get_repo, _to_dollars
+
+
+class ServiceOrderDialog(QDialog):
+    def __init__(self, parent=None, site_name: str = "", obj=None, repo=None):
+        super().__init__(parent)
+        self.setWindowTitle(f"Service Order - {site_name}" if site_name else "Service Order")
+        self._obj = obj
+        self._repo = _get_repo(parent, repo)
+
+        # Fields
+        self.title = QLineEdit()
+        self.description = QTextEdit(); self.description.setFixedHeight(60)
+        self.scheduled = QDateEdit(); self.scheduled.setCalendarPopup(True); self.scheduled.setDate(QDate.currentDate())
+        self.completed = QCheckBox("Completed")
+        self.invoiced = QCheckBox("Invoiced"); self.invoiced.setEnabled(False)
+        self.notes = QTextEdit(); self.notes.setFixedHeight(60)
+
+        # Included services snapshot
+        self.grp_inc = QGroupBox("Included Services (snapshot)")
+        self.tbl = QTableWidget(0, 2)
+        self.tbl.setHorizontalHeaderLabels(["Service", "Price ($)"])
+        self.tbl.horizontalHeader().setStretchLastSection(True)
+        self.tbl.verticalHeader().setVisible(False)
+        self.tbl.setAlternatingRowColors(True)
+        self.tbl.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        self.tbl.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self.tbl.setSelectionMode(QAbstractItemView.SingleSelection)
+
+        lv = QVBoxLayout(self.grp_inc)
+        lv.addWidget(self.tbl, 1)
+
+        # Buttons
+        self.btn_ok = QPushButton("Save")
+        self.btn_cancel = QPushButton("Cancel")
+        btns = QHBoxLayout()
+        btns.addStretch(1)
+        btns.addWidget(self.btn_ok)
+        btns.addWidget(self.btn_cancel)
+
+        # Layout
+        form = QFormLayout()
+        form.addRow("Title", self.title)
+        form.addRow("Description", self.description)
+        form.addRow("Scheduled Date", self.scheduled)
+        form.addRow("", self.completed)
+        form.addRow("", self.invoiced)
+        form.addRow("Notes", self.notes)
+
+        root = QVBoxLayout(self)
+        root.addLayout(form)
+        root.addWidget(self.grp_inc, 1)
+        root.addLayout(btns)
+
+        # Events
+        self.btn_ok.clicked.connect(self.accept)
+        self.btn_cancel.clicked.connect(self.reject)
+
+        # Seed
+        self._load_obj()
+        self._load_included_services()
+
+    def _load_obj(self):
+        if not self._obj:
+            return
+        self.title.setText(self._obj.title or "")
+        self.description.setPlainText(self._obj.description or "")
+        if self._obj.scheduled_date:
+            y, m, d = self._obj.scheduled_date.year, self._obj.scheduled_date.month, self._obj.scheduled_date.day
+            self.scheduled.setDate(QDate(y, m, d))
+        self.completed.setChecked(bool(self._obj.completed))
+        self.invoiced.setChecked(bool(self._obj.invoiced))
+        self.notes.setPlainText(self._obj.notes or "")
+
+    def _load_included_services(self):
+        self.tbl.setRowCount(0)
+        if not (self._repo and self._obj and getattr(self._obj, "id", None)):
+            return
+        try:
+            links = self._repo.list_services_for_so(self._obj.id)
+            for lk in links:
+                r = self.tbl.rowCount()
+                self.tbl.insertRow(r)
+                nm = lk.site_service.name if lk.site_service else "Service"
+                price = _to_dollars(getattr(lk, "unit_price_cents", 0))
+                self.tbl.setItem(r, 0, QTableWidgetItem(nm))
+                itp = QTableWidgetItem(f"{price:.2f}")
+                itp.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
+                self.tbl.setItem(r, 1, itp)
+        except Exception:
+            pass
+
+    def values(self) -> dict:
+        sd = self.scheduled.date().toPython()
+        return dict(
+            title=self.title.text().strip(),
+            description=self.description.toPlainText().strip(),
+            scheduled_date=sd,
+            completed=self.completed.isChecked(),
+            invoiced=self.invoiced.isChecked(),
+            notes=self.notes.toPlainText().strip(),
+        )

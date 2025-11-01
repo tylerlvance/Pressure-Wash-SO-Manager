@@ -1,0 +1,152 @@
+# C:\Users\tyler\Desktop\FoundersSOManager\ui\dialogs\customer_dialog.py
+from __future__ import annotations
+
+from PySide6.QtCore import Qt
+from PySide6.QtWidgets import (
+    QDialog, QVBoxLayout, QHBoxLayout, QFormLayout, QLineEdit, QTextEdit,
+    QLabel, QPushButton, QComboBox, QCheckBox, QSpinBox, QGroupBox
+)
+
+from .common import _get_repo
+
+
+class CustomerDialog(QDialog):
+    """Basic customer editor. Emits payment_profile in values() if filled."""
+    def __init__(self, parent=None, obj=None, repo=None):
+        super().__init__(parent)
+        self.setWindowTitle("Customer")
+        self._obj = obj
+        self._repo = _get_repo(parent, repo)
+
+        # Core fields
+        self.name = QLineEdit()
+        self.phone = QLineEdit()
+        self.email = QLineEdit()
+        self.notes = QTextEdit()
+
+        # Payment group
+        self.grp_pay = QGroupBox("Payment")
+        self.cmb_method = QComboBox()
+        self.cmb_method.addItems(["Other", "ACH", "Card", "Check"])
+        self.bill_street = QLineEdit()
+        self.bill_city_state_zip = QLineEdit()
+
+        # ACH
+        self.ach_routing = QLineEdit()
+        self.ach_account = QLineEdit()
+
+        # Card
+        self.card_brand = QLineEdit()
+        self.card_last4 = QLineEdit()
+        self.card_name = QLineEdit()
+        self.card_exp_month = QSpinBox(); self.card_exp_month.setRange(1, 12)
+        self.card_exp_year = QSpinBox(); self.card_exp_year.setRange(0, 2100)
+        self.chk_default = QCheckBox("Default")
+
+        pay_form = QFormLayout(self.grp_pay)
+        pay_form.addRow("Method", self.cmb_method)
+        pay_form.addRow("Billing Street", self.bill_street)
+        pay_form.addRow("Billing City/State/ZIP", self.bill_city_state_zip)
+        pay_form.addRow(QLabel("-- ACH --"))
+        pay_form.addRow("Routing", self.ach_routing)
+        pay_form.addRow("Account", self.ach_account)
+        pay_form.addRow(QLabel("-- Card --"))
+        pay_form.addRow("Brand", self.card_brand)
+        pay_form.addRow("Last4", self.card_last4)
+        pay_form.addRow("Name on Card", self.card_name)
+        pay_form.addRow("Exp. Month", self.card_exp_month)
+        pay_form.addRow("Exp. Year", self.card_exp_year)
+        pay_form.addRow("", self.chk_default)
+
+        form = QFormLayout()
+        form.addRow("Customer Name", self.name)
+        form.addRow("Phone", self.phone)
+        form.addRow("Email", self.email)
+        form.addRow("Notes", self.notes)
+
+        btns = QHBoxLayout()
+        self.btn_ok = QPushButton("Save")
+        self.btn_cancel = QPushButton("Cancel")
+        btns.addStretch(1)
+        btns.addWidget(self.btn_ok)
+        btns.addWidget(self.btn_cancel)
+
+        root = QVBoxLayout(self)
+        root.addLayout(form)
+        root.addWidget(self.grp_pay)
+        root.addLayout(btns)
+
+        self.btn_ok.clicked.connect(self.accept)
+        self.btn_cancel.clicked.connect(self.reject)
+        self.cmb_method.currentTextChanged.connect(self._toggle_payment_fields)
+
+        self._load_obj()
+        self._toggle_payment_fields(self.cmb_method.currentText())
+
+    def _load_obj(self):
+        if not self._obj:
+            return
+        self.name.setText(self._obj.name or "")
+        self.phone.setText(self._obj.phone or "")
+        self.email.setText(self._obj.email or "")
+        self.notes.setText(self._obj.notes or "")
+
+    def _toggle_payment_fields(self, method_text: str):
+        method = (method_text or "Other").lower()
+        ach = (method == "ach")
+        card = (method == "card")
+        for w in (self.ach_routing, self.ach_account):
+            w.setEnabled(ach)
+        for w in (self.card_brand, self.card_last4, self.card_name, self.card_exp_month, self.card_exp_year):
+            w.setEnabled(card)
+
+    def values(self) -> dict:
+        """
+        Return fields for creating or updating a Customer.
+        Includes an optional 'payment_profile' dict if any payment data is provided.
+        """
+        vals = dict(
+            name=self.name.text().strip(),
+            phone=self.phone.text().strip(),
+            email=self.email.text().strip(),
+            notes=self.notes.toPlainText().strip(),
+        )
+
+        method_text = (self.cmb_method.currentText() or "Other").strip()
+        has_any_payment = any([
+            self.bill_street.text().strip(),
+            self.bill_city_state_zip.text().strip(),
+            self.ach_routing.text().strip(),
+            self.ach_account.text().strip(),
+            self.card_brand.text().strip(),
+            self.card_last4.text().strip(),
+            self.card_name.text().strip(),
+            self.card_exp_month.value() > 0,
+            self.card_exp_year.value() > 0,
+            self.chk_default.isChecked(),
+        ])
+
+        if has_any_payment or method_text != "Other":
+            pp = dict(
+                method=method_text.lower(),
+                billing_street=self.bill_street.text().strip(),
+                billing_city_state_zip=self.bill_city_state_zip.text().strip(),
+                default=self.chk_default.isChecked(),
+                is_default=self.chk_default.isChecked(),  # keep MainWindow repo calls aligned
+            )
+            if pp["method"] == "ach":
+                pp.update(
+                    ach_routing=self.ach_routing.text().strip(),
+                    ach_account=self.ach_account.text().strip(),
+                )
+            elif pp["method"] == "card":
+                pp.update(
+                    card_brand=self.card_brand.text().strip(),
+                    card_last4=self.card_last4.text().strip(),
+                    card_name=self.card_name.text().strip(),
+                    card_exp_month=int(self.card_exp_month.value()),
+                    card_exp_year=int(self.card_exp_year.value()),
+                )
+            vals["payment_profile"] = pp
+
+        return vals

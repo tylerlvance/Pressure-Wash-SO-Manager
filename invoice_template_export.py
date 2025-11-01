@@ -1,0 +1,420 @@
+# C:\Users\tyler\Desktop\FoundersSOManager\invoice_template_export.py
+from __future__ import annotations
+# -*- coding: utf-8 -*-
+
+"""
+Excel → PDF invoice exporter.
+- Writes multiple line items to named ranges DESC_1..N and AMT_1..N when present.
+- Falls back to B12/I12 block if names are absent.
+- Clears the target cells first to avoid leftover zeros.
+- Appends Discount as the last line and mirrors it to OTHER so totals include it.
+"""
+
+from datetime import date
+from typing import Optional, Dict, Tuple, List
+import os
+
+try:
+    import win32com.client as win32
+except Exception:
+    win32 = None
+
+# Fallback grid if names are missing
+DESC_COL = "B"
+AMT_COL  = "I"
+START_ROW = 12
+MAX_ROWS  = 20
+
+OTHER_CELL_FALLBACK = "G39"
+TAX_RATE_CELL_FALLBACK = "G38"
+
+
+# ---------------------------------------------------------------------------
+# Public
+# ---------------------------------------------------------------------------
+def suggest_pdf_name(invoice_no: str, folder: Optional[str] = None) -> str:
+    safe = (invoice_no or "Invoice").replace("/", "-").replace("\\", "-")
+    name = f"Invoice_{safe}.pdf"
+    return os.path.join(folder or os.getcwd(), name)
+
+
+def export_template_pdf_for_so(
+    *,
+    repo,
+    so_id: int,
+    template_path: str,
+    pdf_out_path: str,
+    amount: float = 0.0,  # legacy
+    line_items: Optional[List[Tuple[str, float]]] = None,
+    line_items_cents: Optional[List[Tuple[str, int]]] = None,
+    tax_pct: float = 0.0,          # 0..1
+    discount_dollars: float = 0.0, # positive; we write negative
+    notes: str = "",
+    invoice_no: Optional[str] = None,
+    invoice_date: Optional[date] = None,
+    due_date: Optional[date] = None,
+    show_invoice_no: bool = True,
+) -> str:
+    if win32 is None:
+        raise RuntimeError("Excel automation is unavailable. Install Microsoft Excel and 'pywin32'.")
+    if not os.path.exists(template_path):
+        raise RuntimeError(f"Template not found: {template_path}")
+
+    # Load SO (for defaults)
+    s = repo.s
+    models = getattr(repo, "models", None)
+    if models:
+        so = s.get(models.ServiceOrder, so_id)
+    else:
+        from models import ServiceOrder
+        so = s.get(ServiceOrder, so_id)
+    if not so:
+        raise RuntimeError("Service Order not found.")
+
+    site = so.site
+    customer = site.customer if site else None
+
+    inv_no = invoice_no or _default_invoice_no(so.id, so.scheduled_date)
+    inv_dt = invoice_date or date.today()
+
+    # BILL TO
+    bill_name = (customer.name if customer else "") or ""
+    bill_addr = (site.address or "") if site else (getattr(customer, "address", "") or "")
+    bill_contact = (customer.phone or "")
+    if customer and getattr(customer, "email", None):
+        bill_contact = f"{bill_contact}\n{customer.email}" if bill_contact else customer.email
+
+    # Resolve items to dollars
+    items_dollars: List[Tuple[str, float]] = []
+    if line_items_cents:
+        items_dollars = [(d, (c or 0)/100.0) for d, c in line_items_cents]
+    elif line_items:
+        items_dollars = [(d, float(a or 0.0)) for d, a in line_items]
+    else:
+        desc = (so.title or so.description or "Service").strip()
+        items_dollars = [(desc, float(amount or 0.0))]
+
+    # Excel automation
+    excel = None
+    wb = None
+    try:
+        excel = win32.gencache.EnsureDispatch("Excel.Application")
+        excel.Visible = False
+        excel.DisplayAlerts = False
+
+        wb = excel.Workbooks.Open(template_path, ReadOnly=False)
+        ws = _get_invoice_ws(wb)
+        names = _collect_names(wb)   # UPPERCASE -> Name COM object
+
+        # Header/meta
+
+        # Bill-To
+        _set_named_or(ws, names, "BILL_NAME",  "F7", bill_name)
+        _set_named_or(ws, names, "BILL_ADDR",  "F8", bill_addr,  wrap=True)
+        _set_named_or(ws, names, "BILL_PHONE", "F9", bill_contact, wrap=True)
+
+        # Lines: prefer named DESC_#/AMT_#; fallback to grid
+        slots = _discover_line_slots(names)  # list of idx ints where names exist
+        if slots:
+            _clear_named_lines(ws, names, slots)
+            row_idx_iter = iter(slots)
+            for desc, amt in items_dollars:
+                try:
+                    i = next(row_idx_iter)
+                except StopIteration:
+                    break
+                _set_named_or(ws, names, f"DESC_{i}", f"{DESC_COL}{START_ROW + (i-1)}", desc, wrap=True)
+                _set_named_or(ws, names, f"AMT_{i}",  f"{AMT_COL}{START_ROW + (i-1)}", float(amt))
+            # discount
+            if abs(discount_dollars) > 1e-6:
+                try:
+                    i = next(row_idx_iter)
+                    _set_named_or(ws, names, f"DESC_{i}", f"{DESC_COL}{START_ROW + (i-1)}", "Discount")
+                    _set_named_or(ws, names, f"AMT_{i}",  f"{AMT_COL}{START_ROW + (i-1)}", -abs(float(discount_dollars)))
+                except StopIteration:
+                    pass
+        else:
+            _clear_grid_lines(ws)
+            row = START_ROW
+            for desc, amt in items_dollars:
+                _set_or(ws, f"{DESC_COL}{row}", desc, wrap=True)
+                _set_or(ws, f"{AMT_COL}{row}", float(amt))
+                row += 1
+            if abs(discount_dollars) > 1e-6:
+                _set_or(ws, f"{DESC_COL}{row}", "Discount")
+                _set_or(ws, f"{AMT_COL}{row}", -abs(float(discount_dollars)))
+
+        # OTHER mirror (for totals)
+        if abs(discount_dollars) > 1e-6:
+            if "OTHER" in names:
+                _set_named_or(ws, names, "OTHER", OTHER_CELL_FALLBACK, -abs(float(discount_dollars)))
+            elif "OTHER_FEE" in names:
+                _set_named_or(ws, names, "OTHER_FEE", "I35", -abs(float(discount_dollars)))
+            else:
+                _set_or(ws, OTHER_CELL_FALLBACK, -abs(float(discount_dollars)))
+        else:
+            if "OTHER" in names:
+                _set_named_or(ws, names, "OTHER", OTHER_CELL_FALLBACK, 0.0)
+            else:
+                _set_or(ws, OTHER_CELL_FALLBACK, 0.0)
+
+        # Tax rate
+        if "TAX_RATE" in names:
+            _set_named_or(ws, names, "TAX_RATE", TAX_RATE_CELL_FALLBACK, float(tax_pct))
+        else:
+            _set_or(ws, TAX_RATE_CELL_FALLBACK, float(tax_pct))
+
+        # Notes
+        _set_named_or(ws, names, "NOTES", "B28", notes, wrap=True)
+
+        # Page setup
+        _setup_pages(ws, names)
+
+        # Export
+        wb.Application.CalculateFullRebuild()
+        _ensure_dir(os.path.dirname(pdf_out_path))
+        ws.ExportAsFixedFormat(0, pdf_out_path, 0, True, False)
+    except Exception as e:
+        raise RuntimeError(f"Excel export failed: {e}")
+    finally:
+        try:
+            if wb: wb.Close(SaveChanges=False)
+        except Exception:
+            pass
+        try:
+            if excel: excel.Quit()
+        except Exception:
+            pass
+
+    return pdf_out_path
+
+
+# ---------------------------------------------------------------------------
+# Internal helpers
+# ---------------------------------------------------------------------------
+def _default_invoice_no(so_id: int, so_date: Optional[date]) -> str:
+    d = (so_date or date.today()).strftime("%Y%m%d")
+    return f"FPC-{d}-SO{so_id}"
+
+
+def _get_invoice_ws(wb):
+    try:
+        return wb.Worksheets("Invoice")
+    except Exception:
+        return wb.Worksheets(1)
+
+
+def _collect_names(wb) -> Dict[str, object]:
+    mapping: Dict[str, object] = {}
+    try:
+        for n in wb.Names:
+            nm = (n.Name or "").split("!")[-1]
+            if nm:
+                mapping[nm.upper()] = n
+    except Exception:
+        pass
+    return mapping
+
+
+def _discover_line_slots(names: Dict[str, object]) -> List[int]:
+    """Return 1-based indices where both DESC_i and AMT_i exist as names."""
+    slots: List[int] = []
+    # Probe up to a sensible cap (e.g., 50) so we don't rely on MAX_ROWS.
+    for i in range(1, 51):
+        if f"DESC_{i}" in names and f"AMT_{i}" in names:
+            slots.append(i)
+        else:
+            # we only stop when we miss both (tolerate gaps just in case)
+            if f"DESC_{i}" not in names and f"AMT_{i}" not in names:
+                # if we already had some, break; else keep looking for the first ones
+                if slots:
+                    break
+    return slots
+
+
+def _clear_named_lines(ws, names: Dict[str, object], slots: List[int]):
+    try:
+        ws.Unprotect()
+    except Exception:
+        pass
+    try:
+        for i in slots:
+            try:
+                names[f"DESC_{i}"].RefersToRange.Value = ""
+            except Exception:
+                pass
+            try:
+                names[f"AMT_{i}"].RefersToRange.Value = ""
+            except Exception:
+                pass
+    finally:
+        try:
+            ws.Protect()
+        except Exception:
+            pass
+
+
+def _clear_grid_lines(ws):
+    """Fallback: clear B/I grid block so no stray zeros remain."""
+    try:
+        ws.Unprotect()
+    except Exception:
+        pass
+    try:
+        for k in range(MAX_ROWS):
+            r = START_ROW + k
+            ws.Range(f"{DESC_COL}{r}").Value = ""
+            ws.Range(f"{AMT_COL}{r}").Value = ""
+    finally:
+        try:
+            ws.Protect()
+        except Exception:
+            pass
+
+
+def _set_named_or(ws, names, name: str, fallback_addr: str, value, wrap: bool = False):
+    try:
+        rng = names[name.upper()].RefersToRange if name.upper() in names else ws.Range(fallback_addr)
+        try: ws.Unprotect()
+        except Exception: pass
+        rng.Value = value
+        if wrap:
+            try: rng.WrapText = True
+            except Exception: pass
+    finally:
+        try: ws.Protect()
+        except Exception: pass
+
+
+def _set_or(ws, addr: str, value, wrap: bool = False):
+    try:
+        rng = ws.Range(addr)
+        try: ws.Unprotect()
+        except Exception: pass
+        rng.Value = value
+        if wrap:
+            try: rng.WrapText = True
+            except Exception: pass
+    finally:
+        try: ws.Protect()
+        except Exception: pass
+
+
+def _write_or_clear(ws, names, name: str, fallback_addr: str, text: str):
+    try:
+        rng = names[name.upper()].RefersToRange if name.upper() in names else ws.Range(fallback_addr)
+        try: ws.Unprotect()
+        except Exception: pass
+        rng.Value = text if text is not None else ""
+    finally:
+        try: ws.Protect()
+        except Exception: pass
+
+
+def _write_date(ws, names, inv_dt: date):
+    targets = []
+    if "INV_DATE" in names:
+        try: targets.append(names["INV_DATE"].RefersToRange)
+        except Exception: pass
+    for addr in ("I3", "H3", "G3", "E3", "J3"):
+        try: targets.append(ws.Range(addr))
+        except Exception: pass
+
+    for rng in targets:
+        try: ws.Unprotect()
+        except Exception: pass
+        try: rng.NumberFormat = "m/d/yyyy"
+        except Exception: pass
+        try:
+            rng.Value = inv_dt
+            try: ws.Protect()
+            except Exception: pass
+            return
+        except Exception:
+            continue
+
+
+def _setup_pages(ws, names):
+    ps = ws.PageSetup
+    ps.Orientation = 1  # xlPortrait
+    ps.PaperSize = 1    # xlPaperLetter
+
+    def inches(x): return x * 72.0
+    ps.LeftMargin   = inches(0.25)
+    ps.RightMargin  = inches(0.25)
+    ps.TopMargin    = inches(0.35)
+    ps.BottomMargin = inches(0.45)
+    ps.HeaderMargin = inches(0.2)
+    ps.FooterMargin = inches(0.2)
+
+    ps.PrintTitleRows = ""
+    ps.PrintTitleColumns = ""
+    ps.Zoom = False
+    ps.FitToPagesWide = 1
+    ps.FitToPagesTall = 1
+    ps.CenterHorizontally = True
+    ps.CenterVertically = True
+
+    try:
+        if "PRINT_AREA" in names:
+            rng = names["PRINT_AREA"].RefersToRange
+            ps.PrintArea = rng.Address
+        else:
+            tight = _tight_content_range_including_shapes(ws) or ws.UsedRange
+            ps.PrintArea = tight.Address
+    except Exception:
+        try: ps.PrintArea = ws.UsedRange.Address
+        except Exception: pass
+
+    try: ws.DisplayPageBreaks = False
+    except Exception: pass
+
+
+def _tight_content_range_including_shapes(ws):
+    try:
+        content = _tight_content_range(ws)
+        base = content if content is not None else ws.UsedRange
+        top, left = base.Row, base.Column
+        bottom = base.Row + base.Rows.Count - 1
+        right  = base.Column + base.Columns.Count - 1
+
+        for shp in ws.Shapes:
+            try:
+                tl = shp.TopLeftCell; br = shp.BottomRightCell
+                top = min(top, tl.Row); left = min(left, tl.Column)
+                bottom = max(bottom, br.Row); right = max(right, br.Column)
+            except Exception:
+                continue
+
+        return ws.Range(ws.Cells(top, left), ws.Cells(bottom, right))
+    except Exception:
+        return None
+
+
+def _tight_content_range(ws):
+    try:
+        xlFormulas = -4123; xlValues = -4163; xlByRows = 1; xlByCols = 2; xlNext = 1; xlPrev = 2
+        first_any = ws.Cells.Find(What="*", LookIn=xlFormulas, SearchOrder=xlByRows, SearchDirection=xlNext) \
+                    or ws.Cells.Find(What="*", LookIn=xlValues,   SearchOrder=xlByRows, SearchDirection=xlNext)
+        last_any  = ws.Cells.Find(What="*", LookIn=xlFormulas, SearchOrder=xlByRows, SearchDirection=xlPrev) \
+                    or ws.Cells.Find(What="*", LookIn=xlValues,   SearchOrder=xlByRows, SearchDirection=xlPrev)
+        if first_any is None or last_any is None:
+            return None
+
+        first_col = ws.Cells.Find(What="*", LookIn=xlFormulas, SearchOrder=xlByCols, SearchDirection=xlNext) \
+                    or ws.Cells.Find(What="*", LookIn=xlValues,   SearchOrder=xlByCols, SearchDirection=xlNext)
+        last_col  = ws.Cells.Find(What="*", LookIn=xlFormulas, SearchOrder=xlByCols, SearchDirection=xlPrev) \
+                    or ws.Cells.Find(What="*", LookIn=xlValues,   SearchOrder=xlByCols, SearchDirection=xlPrev)
+        if first_col is None or last_col is None:
+            return None
+
+        top = min(first_any.Row, first_col.Row); left = min(first_any.Column, first_col.Column)
+        bottom = max(last_any.Row, last_col.Row); right = max(last_any.Column, last_col.Column)
+        return ws.Range(ws.Cells(top, left), ws.Cells(bottom, right))
+    except Exception:
+        return None
+
+
+def _ensure_dir(path: str):
+    if path and not os.path.exists(path):
+        os.makedirs(path, exist_ok=True)

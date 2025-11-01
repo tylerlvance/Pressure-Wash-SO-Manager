@@ -1,0 +1,786 @@
+# C:\Users\tyler\Desktop\FoundersSOManager\ui\dialogs.py
+# -*- coding: utf-8 -*-
+from __future__ import annotations
+
+from typing import Optional, List, Tuple
+from datetime import date, timedelta
+import os
+
+from PySide6.QtCore import Qt, QDate
+from PySide6.QtWidgets import (
+    QDialog, QWidget, QVBoxLayout, QHBoxLayout, QFormLayout, QLineEdit, QTextEdit,
+    QLabel, QPushButton, QDateEdit, QComboBox, QCheckBox, QListWidget, QListWidgetItem,
+    QGroupBox, QMessageBox, QSpinBox, QDoubleSpinBox, QTableWidget, QTableWidgetItem,
+    QFileDialog, QAbstractItemView, QHeaderView
+)
+
+# -------------------------------
+# Utilities
+# -------------------------------
+def _get_repo(parent, fallback=None):
+    if fallback is not None:
+        return fallback
+    return getattr(parent, "repo", None)
+
+def _to_cents(dollars: float) -> int:
+    return int(round(float(dollars or 0.0) * 100))
+
+def _to_dollars(cents: int) -> float:
+    return float(cents or 0) / 100.0
+
+# =====================================================================
+# Customer Dialog (unchanged except fixed payment method list)
+# =====================================================================
+class CustomerDialog(QDialog):
+    """Basic customer editor. Emits payment_profile in values() if filled."""
+    def __init__(self, parent=None, obj=None, repo=None):
+        super().__init__(parent)
+        self.setWindowTitle("Customer")
+        self._obj = obj
+        self._repo = _get_repo(parent, repo)
+
+        # Core fields
+        self.name = QLineEdit()
+        self.phone = QLineEdit()
+        self.email = QLineEdit()
+        self.notes = QTextEdit()
+
+        # Payment group
+        self.grp_pay = QGroupBox("Payment")
+        self.cmb_method = QComboBox()
+        self.cmb_method.addItems(["Other", "ACH", "Card", "Check"])  # fixed list
+        self.bill_street = QLineEdit()
+        self.bill_city_state_zip = QLineEdit()
+
+        # ACH
+        self.ach_routing = QLineEdit()
+        self.ach_account = QLineEdit()
+
+        # Card
+        self.card_brand = QLineEdit()
+        self.card_last4 = QLineEdit()
+        self.card_name = QLineEdit()
+        self.card_exp_month = QSpinBox(); self.card_exp_month.setRange(0, 12)
+        self.card_exp_year = QSpinBox(); self.card_exp_year.setRange(0, 2100)
+        self.chk_default = QCheckBox("Default")
+
+        pay_form = QFormLayout(self.grp_pay)
+        pay_form.addRow("Method", self.cmb_method)
+        pay_form.addRow("Billing Street", self.bill_street)
+        pay_form.addRow("Billing City/State/ZIP", self.bill_city_state_zip)
+        pay_form.addRow(QLabel("-- ACH --"))
+        pay_form.addRow("Routing", self.ach_routing)
+        pay_form.addRow("Account", self.ach_account)
+        pay_form.addRow(QLabel("-- Card --"))
+        pay_form.addRow("Brand", self.card_brand)
+        pay_form.addRow("Last4", self.card_last4)
+        pay_form.addRow("Name on Card", self.card_name)
+        pay_form.addRow("Exp. Month", self.card_exp_month)
+        pay_form.addRow("Exp. Year", self.card_exp_year)
+        pay_form.addRow("", self.chk_default)
+
+        form = QFormLayout()
+        form.addRow("Customer Name", self.name)
+        form.addRow("Phone", self.phone)
+        form.addRow("Email", self.email)
+        form.addRow("Notes", self.notes)
+
+        btns = QHBoxLayout()
+        self.btn_ok = QPushButton("Save")
+        self.btn_cancel = QPushButton("Cancel")
+        btns.addStretch(1)
+        btns.addWidget(self.btn_ok)
+        btns.addWidget(self.btn_cancel)
+
+        root = QVBoxLayout(self)
+        root.addLayout(form)
+        root.addWidget(self.grp_pay)
+        root.addLayout(btns)
+
+        self.btn_ok.clicked.connect(self.accept)
+        self.btn_cancel.clicked.connect(self.reject)
+        self.cmb_method.currentTextChanged.connect(self._toggle_payment_fields)
+
+        self._load_obj()
+        self._toggle_payment_fields(self.cmb_method.currentText())
+
+    def _load_obj(self):
+        if not self._obj:
+            return
+        self.name.setText(self._obj.name or "")
+        self.phone.setText(self._obj.phone or "")
+        self.email.setText(self._obj.email or "")
+        self.notes.setText(self._obj.notes or "")
+
+    def _toggle_payment_fields(self, method_text: str):
+        method = (method_text or "Other").lower()
+        ach = (method == "ach")
+        card = (method == "card")
+        for w in (self.ach_routing, self.ach_account):
+            w.setEnabled(ach)
+        for w in (self.card_brand, self.card_last4, self.card_name, self.card_exp_month, self.card_exp_year):
+            w.setEnabled(card)
+
+    def values(self) -> dict:
+        """
+        Return fields for creating or updating a Site.
+        For brand-new sites (self._obj is None), also include
+        'services_selected_names' so the repo can seed contracted services.
+        """
+        vals = dict(
+            name=self.name.text().strip(),
+            address=self.address.toPlainText().strip(),
+            poc_name=self.poc_name.text().strip(),
+            poc_phone=self.poc_phone.text().strip(),
+            poc_email=self.poc_email.text().strip(),
+            cadence_text=self.cadence.currentText().strip(),
+            notes=self.notes.toPlainText().strip(),
+        )
+    
+        # Only provide initial picks when creating a new site
+        if not getattr(self, "_obj", None):
+            sel_names = []
+            for r in range(self.tbl.rowCount()):
+                chk = self.tbl.cellWidget(r, 0)
+                if chk and chk.isChecked():
+                    cmb = self.tbl.cellWidget(r, 1)
+                    name = (cmb.currentText().strip() if cmb else "")
+                    if name:
+                        sel_names.append(name)
+            vals["services_selected_names"] = sel_names
+    
+        return vals
+
+
+
+# =====================================================================
+# Catalog Picker (quick multi-select with prices)
+# =====================================================================
+class CatalogPickerDialog(QDialog):
+    """Simple active catalog multi-select with visible default prices."""
+    def __init__(self, parent=None, repo=None):
+        super().__init__(parent)
+        self.setWindowTitle("Select Services from Catalog")
+        self._repo = _get_repo(parent, repo)
+
+        self.list = QListWidget()
+        self.list.setSelectionMode(QAbstractItemView.MultiSelection)
+
+        btns = QHBoxLayout()
+        self.btn_ok = QPushButton("Add Selected")
+        self.btn_cancel = QPushButton("Cancel")
+        btns.addStretch(1)
+        btns.addWidget(self.btn_ok)
+        btns.addWidget(self.btn_cancel)
+
+        root = QVBoxLayout(self)
+        root.addWidget(self.list, 1)
+        root.addLayout(btns)
+
+        self.btn_ok.clicked.connect(self.accept)
+        self.btn_cancel.clicked.connect(self.reject)
+
+        self._load()
+
+    def _load(self):
+        self.list.clear()
+        rows = []
+        try:
+            rows = self._repo.list_catalog(active_only=True) if self._repo else []
+        except Exception:
+            pass
+        for c in rows:
+            txt = f"{c.name} — ${_to_dollars(getattr(c, 'default_price_cents', 0)):.2f}"
+            it = QListWidgetItem(txt)
+            it.setData(Qt.UserRole, c.id)
+            self.list.addItem(it)
+
+    def selected_ids(self) -> List[int]:
+        return [it.data(Qt.UserRole) for it in self.list.selectedItems()]
+
+# =====================================================================
+# Site Dialog · price-aware Contracted Services (catalog + per-site price)
+# =====================================================================
+class SiteDialog(QDialog):
+    """
+    values() returns legacy keys for compatibility:
+      - services_selected_names: List[str]   (used when creating brand-new sites)
+    For existing sites, price/catalog changes are persisted directly by the dialog
+    via the repo (so main_window doesn't need changes).
+    """
+    def __init__(self, parent=None, customer_name: str = "", obj=None, repo=None):
+        super().__init__(parent)
+        self.setWindowTitle(f"Site - {customer_name}" if customer_name else "Site")
+        self._obj = obj
+        self._repo = _get_repo(parent, repo)
+
+        # Core fields
+        self.name = QLineEdit()
+        self.address = QTextEdit(); self.address.setFixedHeight(60)
+        self.poc_name = QLineEdit()
+        self.poc_phone = QLineEdit()
+        self.poc_email = QLineEdit()
+        self.cadence = QComboBox()
+        self.cadence.addItems([
+            "", "weekly", "biweekly", "monthly_same_day",
+            "monthly_nth_wd:1:0", "monthly_nth_wd:2:0", "monthly_nth_wd:3:0", "monthly_nth_wd:4:0"
+        ])
+        self.notes = QTextEdit(); self.notes.setFixedHeight(60)
+
+        # Services block
+        self.grp_services = QGroupBox("Contracted Services (Catalog + Price)")
+        self.tbl = QTableWidget(0, 3)
+        self.tbl.setHorizontalHeaderLabels(["Active", "Service", "Price ($)"])
+        self.tbl.verticalHeader().setVisible(False)
+        self.tbl.setAlternatingRowColors(True)
+        self.tbl.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self.tbl.setSelectionMode(QAbstractItemView.SingleSelection)
+        # Column sizing: Active (narrow), Service (stretch), Price (narrow)
+        hh = self.tbl.horizontalHeader()
+        hh.setSectionResizeMode(0, QHeaderView.ResizeToContents)
+        hh.setSectionResizeMode(1, QHeaderView.Stretch)
+        hh.setSectionResizeMode(2, QHeaderView.ResizeToContents)
+
+        # Tools row buttons
+        self.btn_pick = QPushButton("Pick…")
+        self.btn_add_custom = QPushButton("Add Custom")  # <— create BEFORE using
+
+        tools = QHBoxLayout()
+        tools.addWidget(self.btn_pick)
+        tools.addWidget(self.btn_add_custom)
+        tools.addStretch(1)
+
+        sv = QVBoxLayout(self.grp_services)
+        sv.addLayout(tools)
+        sv.addWidget(self.tbl, 1)
+
+        # Root layout
+        form = QFormLayout()
+        form.addRow("Site Name", self.name)
+        form.addRow("Address", self.address)
+        form.addRow("POC Name", self.poc_name)
+        form.addRow("POC Phone", self.poc_phone)
+        form.addRow("POC Email", self.poc_email)
+        form.addRow("Service Cadence", self.cadence)
+        form.addRow("Notes", self.notes)
+
+        btns = QHBoxLayout()
+        self.btn_ok = QPushButton("Save")
+        self.btn_cancel = QPushButton("Cancel")
+        btns.addStretch(1)
+        btns.addWidget(self.btn_ok)
+        btns.addWidget(self.btn_cancel)
+
+        root = QVBoxLayout(self)
+        root.addLayout(form)
+        root.addWidget(self.grp_services, 1)
+        root.addLayout(btns)
+
+        # Events
+        self.btn_ok.clicked.connect(self._on_accept)
+        self.btn_cancel.clicked.connect(self.reject)
+        self.btn_pick.clicked.connect(self._on_pick_from_catalog)
+        self.btn_add_custom.clicked.connect(self._on_add_custom)
+
+        # Populate
+        self._catalog = []
+        self._catalog_by_id = {}  # id -> ServiceCatalog row
+        self._load_obj()
+        self._load_catalog()
+        self._load_services()
+
+    # ---- actions ----
+    def _on_add_custom(self):
+        """Insert a custom service row with editable name and $0.00 price."""
+        self._append_row(
+            active=True,
+            name="Custom Service",
+            price_dollars=0.00,
+            service_id=None,
+            catalog_id=None,
+        )
+
+    # ---- data loading
+    def _load_obj(self):
+        if not self._obj:
+            return
+        self.name.setText(self._obj.name or "")
+        self.address.setPlainText(self._obj.address or "")
+        self.poc_name.setText(self._obj.poc_name or "")
+        self.poc_phone.setText(self._obj.poc_phone or "")
+        self.poc_email.setText(self._obj.poc_email or "")
+        self.cadence.setCurrentText(self._obj.cadence_text or "")
+        self.notes.setPlainText(self._obj.notes or "")
+
+    def _load_catalog(self):
+        if not self._repo:
+            return
+        try:
+            self._catalog = self._repo.list_catalog(active_only=True)
+        except Exception:
+            self._catalog = []
+        self._catalog_by_id = {c.id: c for c in self._catalog}
+
+    def _load_services(self):
+        self.tbl.setRowCount(0)
+        if not (self._repo and self._obj and getattr(self._obj, "id", None)):
+            return
+        try:
+            rows = self._repo.list_services_for_site(self._obj.id)
+            for s in rows:
+                self._append_row(
+                    active=bool(getattr(s, "active", True)),
+                    name=(s.name or ""),
+                    price_dollars=_to_dollars(getattr(s, "unit_price_cents", 0)),
+                    service_id=s.id,
+                    catalog_id=getattr(s, "catalog_id", None),
+                )
+        except Exception:
+            pass
+
+    # ---- row helpers
+    def _append_row(self, *, active: bool, name: str, price_dollars: float,
+                    service_id: Optional[int], catalog_id: Optional[int]):
+        r = self.tbl.rowCount()
+        self.tbl.insertRow(r)
+
+        # Active checkbox
+        chk = QCheckBox()
+        chk.setChecked(active)
+        self.tbl.setCellWidget(r, 0, chk)
+
+        # Service name (editable only for custom)
+        cmb = QComboBox()
+        cmb.setEditable(True)
+        # Fill catalog first
+        for c in self._catalog:
+            cmb.addItem(c.name, c.id)
+        # If custom name not found, append as custom
+        idx = cmb.findText(name, Qt.MatchExactly)
+        if idx < 0:
+            cmb.addItem(name or "Custom Service", None)
+            idx = cmb.count() - 1
+        cmb.setCurrentIndex(idx)
+        self.tbl.setCellWidget(r, 1, cmb)
+
+        # Price spin
+        spn = QDoubleSpinBox()
+        spn.setRange(0.00, 999999.00)
+        spn.setDecimals(2)
+        spn.setSingleStep(1.00)
+        spn.setValue(price_dollars)
+        self.tbl.setCellWidget(r, 2, spn)
+
+        # Hidden ids
+        self.tbl.setItem(r, 0, self._mk_hidden(service_id))
+        self.tbl.setItem(r, 1, self._mk_hidden(catalog_id))
+
+        # Auto-price when selection changes
+        def on_changed(_idx, row=r):
+            self._row_service_changed(row)
+        cmb.currentIndexChanged.connect(on_changed)
+
+    def _row_service_changed(self, row: int):
+        """If the row's combobox points to a catalog item, set price to default."""
+        cmb: QComboBox = self.tbl.cellWidget(row, 1)
+        spn: QDoubleSpinBox = self.tbl.cellWidget(row, 2)
+        if not cmb or not spn:
+            return
+        selected_cat_id = cmb.currentData()
+        # update hidden catalog_id in col1 item
+        it_hidden = self.tbl.item(row, 1)
+        if it_hidden:
+            it_hidden.setData(Qt.UserRole, selected_cat_id)
+        if selected_cat_id is None:
+            return  # custom name; don't change price automatically
+        cat = self._catalog_by_id.get(selected_cat_id)
+        if not cat:
+            return
+        spn.setValue(_to_dollars(getattr(cat, "default_price_cents", 0)))
+
+    def _mk_hidden(self, val):
+        it = QTableWidgetItem(str(val) if val is not None else "")
+        it.setFlags(Qt.ItemIsEnabled)  # not editable
+        it.setData(Qt.UserRole, val)
+        it.setTextAlignment(Qt.AlignLeft | Qt.AlignVCenter)
+        return it
+
+    def _on_pick_from_catalog(self):
+        """Open a picker dialog to multi-select catalog rows and add them with default prices."""
+        if not self._catalog:
+            QMessageBox.information(self, "Catalog", "No catalog services available. Add some in Catalog Manager.")
+            return
+        dlg = CatalogPickerDialog(self, repo=self._repo)
+        if dlg.exec():
+            ids = dlg.selected_ids()
+            for cid in ids:
+                cat = self._catalog_by_id.get(cid)
+                if not cat:
+                    continue
+                self._append_row(
+                    active=True,
+                    name=cat.name,
+                    price_dollars=_to_dollars(getattr(cat, "default_price_cents", 0)),
+                    service_id=None,
+                    catalog_id=cid,
+                )
+
+    # ---- persist services (existing site only)
+    def _persist_services(self):
+        if not (self._repo and self._obj and getattr(self._obj, "id", None)):
+            return  # new site flow handled by legacy list below
+        site_id = int(self._obj.id)
+        row_count = self.tbl.rowCount()
+        for r in range(row_count):
+            chk: QCheckBox = self.tbl.cellWidget(r, 0)
+            cmb: QComboBox = self.tbl.cellWidget(r, 1)
+            spn: QDoubleSpinBox = self.tbl.cellWidget(r, 2)
+            service_id = self.tbl.item(r, 0).data(Qt.UserRole)    # col0 hidden item
+            catalog_id = self.tbl.item(r, 1).data(Qt.UserRole)    # col1 hidden item
+
+            name = cmb.currentText().strip()
+            chosen_cat_id = cmb.currentData()
+            if chosen_cat_id is not None:
+                catalog_id = chosen_cat_id  # prefer the currently selected catalog id
+
+            active = bool(chk.isChecked())
+            price_cents = _to_cents(spn.value())
+
+            if service_id:
+                try:
+                    self._repo.update_site_service(
+                        int(service_id),
+                        name=name,
+                        catalog_id=catalog_id,
+                        unit_price_cents=price_cents,
+                        active=active,
+                    )
+                except Exception as e:
+                    print("update_site_service error:", e)
+            else:
+                try:
+                    self._repo.add_service_to_site(
+                        site_id,
+                        name=name if (catalog_id is None) else None,
+                        catalog_id=catalog_id,
+                        unit_price_cents=price_cents,
+                    )
+                except Exception as e:
+                    print("add_service_to_site error:", e)
+
+    # ---- accept/save
+    def _on_accept(self):
+        try:
+            self._persist_services()
+        except Exception as e:
+            print("persist services error:", e)
+        self.accept()
+
+
+# =====================================================================
+# Service Order Dialog · read-only list of included services + prices
+# =====================================================================
+class ServiceOrderDialog(QDialog):
+    def __init__(self, parent=None, site_name: str = "", obj=None, repo=None):
+        super().__init__(parent)
+        self.setWindowTitle(f"Service Order - {site_name}" if site_name else "Service Order")
+        self._obj = obj
+        self._repo = _get_repo(parent, repo)
+
+        self.title = QLineEdit()
+        self.description = QTextEdit(); self.description.setFixedHeight(60)
+        self.scheduled = QDateEdit(); self.scheduled.setCalendarPopup(True); self.scheduled.setDate(QDate.currentDate())
+        self.completed = QCheckBox("Completed")
+        self.invoiced = QCheckBox("Invoiced"); self.invoiced.setEnabled(False)
+        self.notes = QTextEdit(); self.notes.setFixedHeight(60)
+
+        self.grp_inc = QGroupBox("Included Services (snapshot)")
+        self.tbl = QTableWidget(0, 2)
+        self.tbl.setHorizontalHeaderLabels(["Service", "Price ($)"])
+        self.tbl.horizontalHeader().setStretchLastSection(True)
+        self.tbl.verticalHeader().setVisible(False)
+        self.tbl.setAlternatingRowColors(True)
+        self.tbl.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        self.tbl.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self.tbl.setSelectionMode(QAbstractItemView.SingleSelection)
+        lv = QVBoxLayout(self.grp_inc)
+        lv.addWidget(self.tbl, 1)
+
+        self.btn_ok = QPushButton("Save")
+        self.btn_cancel = QPushButton("Cancel")
+        btns = QHBoxLayout()
+        btns.addStretch(1)
+        btns.addWidget(self.btn_ok)
+        btns.addWidget(self.btn_cancel)
+
+        form = QFormLayout()
+        form.addRow("Title", self.title)
+        form.addRow("Description", self.description)
+        form.addRow("Scheduled Date", self.scheduled)
+        form.addRow("", self.completed)
+        form.addRow("", self.invoiced)
+        form.addRow("Notes", self.notes)
+
+        root = QVBoxLayout(self)
+        root.addLayout(form)
+        root.addWidget(self.grp_inc, 1)
+        root.addLayout(btns)
+
+        self.btn_ok.clicked.connect(self.accept)
+        self.btn_cancel.clicked.connect(self.reject)
+
+        self._load_obj()
+        self._load_included_services()
+
+    def _load_obj(self):
+        if not self._obj:
+            return
+        self.title.setText(self._obj.title or "")
+        self.description.setPlainText(self._obj.description or "")
+        if self._obj.scheduled_date:
+            y, m, d = self._obj.scheduled_date.year, self._obj.scheduled_date.month, self._obj.scheduled_date.day
+            self.scheduled.setDate(QDate(y, m, d))
+        self.completed.setChecked(bool(self._obj.completed))
+        self.invoiced.setChecked(bool(self._obj.invoiced))
+        self.notes.setPlainText(self._obj.notes or "")
+
+    def _load_included_services(self):
+        self.tbl.setRowCount(0)
+        if not (self._repo and self._obj and getattr(self._obj, "id", None)):
+            return
+        try:
+            links = self._repo.list_services_for_so(self._obj.id)
+            for lk in links:
+                r = self.tbl.rowCount()
+                self.tbl.insertRow(r)
+                nm = lk.site_service.name if lk.site_service else "Service"
+                price = _to_dollars(getattr(lk, "unit_price_cents", 0))
+                self.tbl.setItem(r, 0, QTableWidgetItem(nm))
+                itp = QTableWidgetItem(f"{price:.2f}"); itp.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
+                self.tbl.setItem(r, 1, itp)
+        except Exception:
+            pass
+
+    def values(self) -> dict:
+        sd = self.scheduled.date().toPython()
+        return dict(
+            title=self.title.text().strip(),
+            description=self.description.toPlainText().strip(),
+            scheduled_date=sd,
+            completed=self.completed.isChecked(),
+            invoiced=self.invoiced.isChecked(),
+            notes=self.notes.toPlainText().strip(),
+        )
+
+# =====================================================================
+# Generate Invoice Dialog (compat)
+# =====================================================================
+class GenerateInvoiceDialog(QDialog):
+    def __init__(self, parent=None, repo=None, so_id: Optional[int] = None):
+        super().__init__(parent)
+        self.setWindowTitle("Generate Invoice")
+        self.repo = _get_repo(parent, repo)
+        self.so_id = so_id
+
+        self.edtInvoiceNo = QLineEdit()
+        self.dateInvoice = QDateEdit(); self.dateInvoice.setCalendarPopup(True)
+        self.dateDue = QDateEdit(); self.dateDue.setCalendarPopup(True)
+        self.cmbTerms = QComboBox(); self.cmbTerms.addItems(["7", "14", "30"]); self.cmbTerms.setCurrentText("14")
+
+        self.lblBillTo = QTextEdit(); self.lblBillTo.setReadOnly(True); self.lblBillTo.setFixedHeight(70)
+        self.tbl = QTableWidget(0, 2)
+        self.tbl.setHorizontalHeaderLabels(["Description", "Amount ($)"])
+        self.tbl.horizontalHeader().setStretchLastSection(True)
+        self.tbl.verticalHeader().setVisible(False)
+        self.tbl.setAlternatingRowColors(True)
+        self.tbl.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        self.tbl.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self.tbl.setSelectionMode(QAbstractItemView.SingleSelection)
+
+        self.spnTaxPct = QDoubleSpinBox(); self.spnTaxPct.setRange(0.0, 1.0); self.spnTaxPct.setDecimals(3); self.spnTaxPct.setSingleStep(0.01); self.spnTaxPct.setValue(0.00)
+        self.spnDiscount = QDoubleSpinBox(); self.spnDiscount.setRange(0.0, 999999.0); self.spnDiscount.setDecimals(2); self.spnDiscount.setSingleStep(1.00); self.spnDiscount.setValue(0.00)
+        self.txtNotes = QTextEdit(); self.txtNotes.setFixedHeight(60)
+
+        self.edtTemplate = QLineEdit(os.path.join("data", "invoice_template.xlsx"))
+        self.btnBrowseTpl = QPushButton("Browse...")
+        self.edtOutPdf = QLineEdit(os.path.join("invoices", "Invoice.pdf"))
+        self.btnBrowseOut = QPushButton("Save to...")
+
+        self.btnPreview = QPushButton("Refresh Preview")
+        self.btnGenerate = QPushButton("Generate")
+        self.btnCancel = QPushButton("Cancel")
+
+        meta = QFormLayout()
+        meta.addRow("Invoice #", self.edtInvoiceNo)
+        meta.addRow("Invoice Date", self.dateInvoice)
+        meta.addRow("Due Date", self.dateDue)
+        meta.addRow("Terms (days)", self.cmbTerms)
+
+        bill = QVBoxLayout()
+        bill.addWidget(QLabel("Bill To"))
+        bill.addWidget(self.lblBillTo)
+
+        money = QFormLayout()
+        money.addRow("Tax % (0-1)", self.spnTaxPct)
+        money.addRow("Discount ($)", self.spnDiscount)
+        money.addRow("Notes", self.txtNotes)
+
+        tpl_row = QHBoxLayout(); tpl_row.addWidget(self.edtTemplate, 1); tpl_row.addWidget(self.btnBrowseTpl)
+        out_row = QHBoxLayout(); out_row.addWidget(self.edtOutPdf, 1); out_row.addWidget(self.btnBrowseOut)
+        paths_form = QFormLayout()
+        paths_form.addRow("Template", self._wrap(tpl_row))
+        paths_form.addRow("Output PDF", self._wrap(out_row))
+
+        btns = QHBoxLayout()
+        btns.addStretch(1)
+        btns.addWidget(self.btnPreview)
+        btns.addWidget(self.btnGenerate)
+        btns.addWidget(self.btnCancel)
+
+        root = QVBoxLayout(self)
+        top = QHBoxLayout()
+        top.addLayout(meta, 1)
+        top.addLayout(bill, 1)
+        root.addLayout(top)
+        root.addWidget(QLabel("Line Items"))
+        root.addWidget(self.tbl, 1)
+        root.addLayout(money)
+        root.addLayout(paths_form)
+        root.addLayout(btns)
+
+        self.btnCancel.clicked.connect(self.reject)
+        self.btnPreview.clicked.connect(self.refresh_preview)
+        self.btnGenerate.clicked.connect(self.generate)
+        self.btnBrowseTpl.clicked.connect(self._pick_template)
+        self.btnBrowseOut.clicked.connect(self._pick_output)
+
+        self._seed_from_repo()
+
+    def _wrap(self, layout):
+        w = QWidget(); w.setLayout(layout); return w
+
+    def _seed_from_repo(self):
+        if not (self.repo and self.so_id):
+            return
+        seed = self.repo.invoice_seed_for_so(self.so_id, terms_days=int(self.cmbTerms.currentText()))
+        self.edtInvoiceNo.setText(seed["invoice_no"])
+        inv = seed["invoice_date"]; due = seed["due_date"]
+        self.dateInvoice.setDate(QDate(inv.year, inv.month, inv.day))
+        self.dateDue.setDate(QDate(due.year, due.month, due.day))
+
+        bill_lines = [seed.get("bill_to_name", ""), seed.get("bill_to_addr", ""), seed.get("bill_to_contact", "")]
+        self.lblBillTo.setPlainText("\n".join([x for x in bill_lines if x]))
+
+        self.tbl.setRowCount(0)
+        for desc, amt_cents in seed["line_items_cents"]:
+            r = self.tbl.rowCount(); self.tbl.insertRow(r)
+            self.tbl.setItem(r, 0, QTableWidgetItem(desc or "Service"))
+            itp = QTableWidgetItem(f"{_to_dollars(amt_cents):.2f}"); itp.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
+            self.tbl.setItem(r, 1, itp)
+
+        out_dir = os.path.join("invoices")
+        os.makedirs(out_dir, exist_ok=True)
+        self.edtOutPdf.setText(os.path.join(out_dir, f"{seed['invoice_no']}.pdf"))
+
+    def _pick_template(self):
+        fn, _ = QFileDialog.getOpenFileName(self, "Select Invoice Template", self.edtTemplate.text(), "Excel (*.xlsx *.xlsm)")
+        if fn:
+            self.edtTemplate.setText(fn)
+
+    def _pick_output(self):
+        fn, _ = QFileDialog.getSaveFileName(self, "Save Invoice PDF", self.edtOutPdf.text(), "PDF (*.pdf)")
+        if fn:
+            self.edtOutPdf.setText(fn)
+
+    def refresh_preview(self):
+        QMessageBox.information(self, "Preview", "Preview is refreshed (use Generate to produce the PDF).")
+
+    def generate(self):
+        if not (self.repo and self.so_id):
+            QMessageBox.warning(self, "Generate", "Missing repo / SO id.")
+            return
+        template = self.edtTemplate.text().strip()
+        outpdf = self.edtOutPdf.text().strip()
+        if not template or not os.path.exists(template):
+            QMessageBox.warning(self, "Generate", "Template file not found.")
+            return
+        outdir = os.path.dirname(outpdf)
+        if outdir and not os.path.exists(outdir):
+            os.makedirs(outdir, exist_ok=True)
+
+        rows = self.tbl.rowCount()
+        line_items_cents: List[Tuple[str, int]] = []
+        for r in range(rows):
+            desc = (self.tbl.item(r, 0).text() if self.tbl.item(r, 0) else "Service").strip()
+            amt = float(self.tbl.item(r, 1).text() or "0")
+            line_items_cents.append((desc, _to_cents(amt)))
+
+        discount = float(self.spnDiscount.value() or 0.0)
+        tax_pct = float(self.spnTaxPct.value() or 0.0)
+        notes = self.txtNotes.toPlainText().strip()
+        inv_no = self.edtInvoiceNo.text().strip()
+        inv_dt = self.dateInvoice.date().toPython()
+        due_dt = self.dateDue.date().toPython()
+
+        try:
+            from invoice_template_export import export_template_pdf_for_so
+            export_template_pdf_for_so(
+                repo=self.repo,
+                so_id=self.so_id,
+                template_path=template,
+                pdf_out_path=outpdf,
+                line_items_cents=line_items_cents,
+                discount_dollars=discount,
+                tax_pct=tax_pct,
+                notes=notes,
+                invoice_no=inv_no,
+                invoice_date=inv_dt,
+                due_date=due_dt,
+                show_invoice_no=True,
+            )
+        except Exception as e:
+            QMessageBox.critical(self, "Export failed", f"{e}")
+            return
+
+        try:
+            from models import Invoice, ServiceOrder
+            s = self.repo.s
+            so = s.get(ServiceOrder, self.so_id)
+            inv = s.query(Invoice).filter(Invoice.service_order_id == self.so_id).first()
+            subtotal_cents = sum(a for _, a in line_items_cents)
+            tax_cents = int(round(subtotal_cents * tax_pct))
+            total_cents = subtotal_cents + tax_cents - _to_cents(discount)
+
+            if inv is None:
+                inv = Invoice(
+                    service_order_id=self.so_id,
+                    invoice_no=inv_no,
+                    invoice_date=inv_dt,
+                    due_date=due_dt,
+                    subtotal_cents=subtotal_cents,
+                    tax_cents=tax_cents,
+                    total_cents=total_cents,
+                    paid=False,
+                    notes=notes,
+                    pdf_path=outpdf,
+                )
+                s.add(inv)
+            else:
+                inv.invoice_no = inv_no
+                inv.invoice_date = inv_dt
+                inv.due_date = due_dt
+                inv.subtotal_cents = subtotal_cents
+                inv.tax_cents = tax_cents
+                inv.total_cents = total_cents
+                inv.notes = notes
+                inv.pdf_path = outpdf
+
+            if so:
+                so.invoiced = True
+            s.commit()
+        except Exception as e:
+            QMessageBox.warning(self, "Invoice Save", f"Saved PDF but DB update had an issue:\n{e}")
+            return
+
+        QMessageBox.information(self, "Success", f"Invoice created:\n{outpdf}")
+        self.accept()

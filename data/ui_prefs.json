@@ -1,0 +1,16 @@
+{
+  "sos_panel": {
+    "column_widths": [
+      84,
+      80,
+      48,
+      51,
+      87,
+      588
+    ],
+    "filter_status": "Open"
+  },
+  "month_panel": {
+    "open_only": true
+  }
+}

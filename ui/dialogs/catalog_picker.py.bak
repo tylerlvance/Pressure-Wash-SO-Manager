@@ -1,0 +1,54 @@
+# -*- coding: utf-8 -*-
+from __future__ import annotations
+
+from typing import List
+from PySide6.QtCore import Qt
+from PySide6.QtWidgets import (
+    QDialog, QVBoxLayout, QHBoxLayout, QListWidget, QListWidgetItem,
+    QPushButton, QAbstractItemView
+)
+
+from .common import _get_repo, _to_dollars
+
+
+class CatalogPickerDialog(QDialog):
+    """Simple active catalog multi-select with visible default prices."""
+    def __init__(self, parent=None, repo=None):
+        super().__init__(parent)
+        self.setWindowTitle("Select Services from Catalog")
+        self._repo = _get_repo(parent, repo)
+
+        self.list = QListWidget()
+        self.list.setSelectionMode(QAbstractItemView.MultiSelection)
+
+        btns = QHBoxLayout()
+        self.btn_ok = QPushButton("Add Selected")
+        self.btn_cancel = QPushButton("Cancel")
+        btns.addStretch(1)
+        btns.addWidget(self.btn_ok)
+        btns.addWidget(self.btn_cancel)
+
+        root = QVBoxLayout(self)
+        root.addWidget(self.list, 1)
+        root.addLayout(btns)
+
+        self.btn_ok.clicked.connect(self.accept)
+        self.btn_cancel.clicked.connect(self.reject)
+
+        self._load()
+
+    def _load(self):
+        self.list.clear()
+        rows = []
+        try:
+            rows = self._repo.list_catalog(active_only=True) if self._repo else []
+        except Exception:
+            rows = []
+        for c in rows:
+            txt = f"{c.name} — ${_to_dollars(getattr(c, 'default_price_cents', 0)):.2f}"
+            it = QListWidgetItem(txt)
+            it.setData(Qt.UserRole, c.id)
+            self.list.addItem(it)
+
+    def selected_ids(self) -> List[int]:
+        return [it.data(Qt.UserRole) for it in self.list.selectedItems()]

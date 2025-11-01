@@ -1,0 +1,25 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.log
+.env
+.venv/
+venv/
+
+# Builds and artifacts
+/dist/
+/build/
+*.zip
+*.exe
+*.msi
+*.pdf
+*.pptx
+
+# IDE
+.vscode/
+.idea/
+
+# Local DBs
+*.db

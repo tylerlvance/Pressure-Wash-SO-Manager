@@ -1,0 +1,361 @@
+# C:\Users\tyler\Desktop\FoundersSOManager\ui\invoice_dialog.py
+from __future__ import annotations
+# -*- coding: utf-8 -*-
+
+import os
+import random
+from dataclasses import dataclass
+from datetime import date
+from typing import Optional, List, Tuple
+
+from PySide6.QtCore import Qt, QDate, QTimer
+from PySide6.QtGui import QIcon
+from PySide6.QtWidgets import (
+    QDialog, QVBoxLayout, QHBoxLayout, QFormLayout, QLineEdit, QTextEdit,
+    QLabel, QPushButton, QDateEdit, QDoubleSpinBox, QTableWidget, QTableWidgetItem,
+    QAbstractItemView, QMessageBox, QWidget, QSplitter, QApplication, QHeaderView
+)
+
+# Excel → PDF exporter
+from invoice_template_export import export_template_pdf_for_so, suggest_pdf_name
+
+# PDF preview
+from ui.pdf_preview_silent2 import SilentPdfPreview
+
+
+def _project_root() -> str:
+    here = os.path.dirname(__file__)
+    return os.path.abspath(os.path.join(here, ".."))
+
+
+DEFAULT_TEMPLATE_PATH = os.path.join(_project_root(), "invoicetemplate", "service-invoice.xlsx")
+
+
+def _find_logo_path() -> Optional[str]:
+    root = _project_root()
+    for p in [
+        os.path.join(root, "3a7e79be-0c84-4bc3-8444-a4753cd60b1e.png"),
+        os.path.join(root, "logo.png"),
+        os.path.join(root, "assets", "logo.png"),
+    ]:
+        if os.path.exists(p):
+            return p
+    return None
+
+
+def _attachments_dir_for_so(so_id: int) -> str:
+    root = _project_root()
+    path = os.path.join(root, "attachments", "service_order", str(so_id), "Invoices")
+    os.makedirs(path, exist_ok=True)
+    return path
+
+
+@dataclass
+class _Seed:
+    invoice_no: str
+    invoice_date: date
+    due_date: date
+    notes: str
+    line_items_cents: List[Tuple[str, int]]
+    bill_to_name: str
+    bill_to_addr: str
+    bill_to_contact: str
+
+
+def _to_dollars(cents: int) -> float:
+    return round((cents or 0) / 100.0, 2)
+
+
+# ---------- auto note helpers ----------
+_AUTO_TAG = "[AutoNote]:"
+
+def _strip_auto_note(text: str) -> str:
+    lines = text.splitlines()
+    kept = [ln for ln in lines if not ln.strip().startswith(_AUTO_TAG)]
+    # Remove trailing empty lines that might be left behind
+    while kept and kept[-1].strip() == "":
+        kept.pop()
+    return "\n".join(kept)
+
+def _append_auto_note(base_text: str, note: str) -> str:
+    base = _strip_auto_note(base_text).rstrip()
+    auto_line = f"{_AUTO_TAG} {note}".strip()
+    if base:
+        return f"{base}\n\n{auto_line}"
+    return auto_line
+
+
+class InvoiceDialog(QDialog):
+    """
+    Preview-ready invoice dialog:
+      • Auto-loads priced line items from repo.invoice_seed_for_so()
+      • Lets you set Tax % and Discount ($)
+      • Writes discount as a line AND to OTHER, via exporter (discount_dollars)
+      • Live PDF preview (QtPdf) and final export to attachments folder
+      • Random one-liner injector for Notes (replaces previous auto note on each click)
+    """
+    def __init__(self, parent: QWidget, repo, so_id: int):
+        super().__init__(parent)
+        self.setWindowTitle("Generate Invoice")
+        self.repo = repo
+        self.so_id = so_id
+        self.session = repo.s
+
+        # new: open larger by default
+        self.setMinimumSize(1150, 750)
+        self.resize(1320, 820)
+
+        logo = _find_logo_path()
+        if logo:
+            self.setWindowIcon(QIcon(logo))
+
+        # ===== Left meta
+        self.le_invoice_no = QLineEdit()
+        self.dt_invoice = QDateEdit(); self.dt_invoice.setCalendarPopup(True)
+        self.dt_due = QDateEdit(); self.dt_due.setCalendarPopup(True)
+
+        self.tax_pct = QDoubleSpinBox(); self.tax_pct.setRange(0.0, 100.0); self.tax_pct.setDecimals(2); self.tax_pct.setSingleStep(0.25); self.tax_pct.setValue(0.00)
+        self.discount = QDoubleSpinBox(); self.discount.setRange(0.0, 999999.0); self.discount.setDecimals(2); self.discount.setSingleStep(1.00); self.discount.setValue(0.00)
+
+        # Notes + randomizer
+        self.notes = QTextEdit(); self.notes.setPlaceholderText("Optional notes shown on invoice.")
+        self.btn_random_note = QPushButton("Random note")
+        self.btn_random_note.setToolTip("Insert a friendly one-liner into Notes. Clicking again replaces the previous auto note.")
+
+        # Bill-to and lines preview
+        self.bill_to = QTextEdit(); self.bill_to.setReadOnly(True); self.bill_to.setFixedHeight(70)
+
+        self.tbl = QTableWidget(0, 2)
+        self.tbl.setHorizontalHeaderLabels(["Description", "Amount ($)"])
+        self.tbl.horizontalHeader().setStretchLastSection(True)
+        self.tbl.verticalHeader().setVisible(False)
+        self.tbl.setAlternatingRowColors(True)
+        self.tbl.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        self.tbl.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self.tbl.setSelectionMode(QAbstractItemView.SingleSelection)
+        
+        h = self.tbl.horizontalHeader()
+        h.setSectionResizeMode(0, QHeaderView.Stretch)
+        h.setSectionResizeMode(1, QHeaderView.ResizeToContents)
+        self.tbl.setColumnWidth(1, 120)
+        amt_header = self.tbl.horizontalHeaderItem(1)
+        if amt_header:
+            amt_header.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
+
+        # PDF previewer (right)
+        self.preview = SilentPdfPreview(self)
+
+        # Buttons
+        self.btn_refresh = QPushButton("Refresh Preview")
+        self.btn_generate = QPushButton("Generate")
+
+        # Layout
+        meta = QFormLayout()
+        meta.addRow("Invoice #", self.le_invoice_no)
+        meta.addRow("Invoice Date", self.dt_invoice)
+        meta.addRow("Due Date", self.dt_due)
+        meta.addRow("Tax %", self.tax_pct)
+        meta.addRow("Discount ($)", self.discount)
+
+        # "Notes" label with the random button next to it
+        notes_label_row = QWidget()
+        notes_h = QHBoxLayout(notes_label_row); notes_h.setContentsMargins(0, 0, 0, 0)
+        notes_h.addWidget(QLabel("Notes"))
+        notes_h.addStretch(1)
+        notes_h.addWidget(self.btn_random_note)
+        meta.addRow(notes_label_row, self.notes)
+
+        left = QWidget(); left_lay = QVBoxLayout(left)
+        left_lay.addLayout(meta)
+        left_lay.addWidget(QLabel("Bill To"))
+        left_lay.addWidget(self.bill_to)
+        left_lay.addWidget(QLabel("Line Items"))
+        left_lay.addWidget(self.tbl, 1)
+
+        btn_row = QHBoxLayout()
+        btn_row.addStretch(1)
+        btn_row.addWidget(self.btn_generate)
+        btn_row.addWidget(self.btn_refresh)
+
+        split = QSplitter(Qt.Horizontal)
+        split.addWidget(left)
+        split.addWidget(self.preview)
+        split.setStretchFactor(0, 0)
+        split.setStretchFactor(1, 1)
+        split.setSizes([520, 800])
+
+        root = QVBoxLayout(self)
+        root.addWidget(split, 1)
+        root.addLayout(btn_row)
+
+        # Events
+        self.btn_refresh.clicked.connect(self._refresh_preview)
+        self.btn_generate.clicked.connect(self._export_final_pdf)
+        self.btn_random_note.clicked.connect(self._inject_random_note)
+
+        for w in (self.le_invoice_no, self.notes):
+            w.textChanged.connect(self._debounced_refresh)
+        for w in (self.dt_invoice, self.dt_due):
+            w.dateChanged.connect(self._debounced_refresh)
+        for w in (self.tax_pct, self.discount):
+            w.valueChanged.connect(self._debounced_refresh)
+
+        self._debounce = QTimer(self); self._debounce.setSingleShot(True); self._debounce.timeout.connect(self._refresh_preview)
+
+        # Source for one-liners. Edit freely.
+        self._auto_notes_pool: List[str] = [
+            "Thank you for your business.",
+            "We appreciate the opportunity to serve your location.",
+            "Work performed with care and attention to detail.",
+            "Scheduled to your preferences and completed as requested.",
+            "Exterior cleaned to restore curb appeal.",
+            "Eco-friendly detergents used per site requirements.",
+            "Please reach out if you need anything adjusted.",
+            "Ask about route pricing for recurring service.",
+            "Photos available on request.",
+            "Proudly serving our Northern California neighbors.",
+        ]
+
+        # Load seed from repo
+        self._seed = self._load_seed()
+        self._apply_seed_to_ui()
+        QTimer.singleShot(0, self._refresh_preview)
+
+    # ---------- random note ----------
+    def _inject_random_note(self):
+        if not self._auto_notes_pool:
+            return
+        choice = random.choice(self._auto_notes_pool)
+        current = self.notes.toPlainText()
+        updated = _append_auto_note(current, choice)
+        self.notes.setPlainText(updated)
+
+    # ---------- seed ----------
+    def _load_seed(self) -> _Seed:
+        seed = self.repo.invoice_seed_for_so(self.so_id, terms_days=14)
+        return _Seed(
+            invoice_no=seed["invoice_no"],
+            invoice_date=seed["invoice_date"],
+            due_date=seed["due_date"],
+            notes=seed.get("notes", ""),
+            line_items_cents=seed.get("line_items_cents", []),
+            bill_to_name=seed.get("bill_to_name", ""),
+            bill_to_addr=seed.get("bill_to_addr", ""),
+            bill_to_contact=seed.get("bill_to_contact", ""),
+        )
+
+    def _apply_seed_to_ui(self):
+        self.le_invoice_no.setText(self._seed.invoice_no)
+        inv = self._seed.invoice_date; due = self._seed.due_date
+        self.dt_invoice.setDate(QDate(inv.year, inv.month, inv.day))
+        self.dt_due.setDate(QDate(due.year, due.month, due.day))
+        self.notes.setPlainText(self._seed.notes)
+
+        self.bill_to.setPlainText(
+            "\n".join(
+                [x for x in [self._seed.bill_to_name, self._seed.bill_to_addr, self._seed.bill_to_contact] if x]
+            )
+        )
+
+        self.tbl.setRowCount(0)
+        for desc, cents in self._seed.line_items_cents:
+            r = self.tbl.rowCount(); self.tbl.insertRow(r)
+            self.tbl.setItem(r, 0, QTableWidgetItem(desc or "Service"))
+            itp = QTableWidgetItem(f"{_to_dollars(cents):.2f}")
+            itp.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
+            self.tbl.setItem(r, 1, itp)
+
+    # ---------- helpers ----------
+    def _debounced_refresh(self):
+        self._debounce.start(300)
+
+    def _collect_line_items_cents(self) -> List[Tuple[str, int]]:
+        rows = self.tbl.rowCount()
+        items: List[Tuple[str, int]] = []
+        for r in range(rows):
+            desc = (self.tbl.item(r, 0).text() if self.tbl.item(r, 0) else "Service").strip()
+            try:
+                amt = float(self.tbl.item(r, 1).text() or "0")
+            except Exception:
+                amt = 0.0
+            items.append((desc, int(round(amt * 100))))
+        return items
+
+    # ---------- preview ----------
+    def _refresh_preview(self):
+        template_path = DEFAULT_TEMPLATE_PATH if os.path.exists(DEFAULT_TEMPLATE_PATH) else ""
+        if not template_path or not os.path.exists(template_path):
+            QMessageBox.warning(self, "Template Missing", f"Invoice template not found:\n{DEFAULT_TEMPLATE_PATH}")
+            return
+
+        tmp_pdf = self.preview.new_temp_path()
+        try:
+            export_template_pdf_for_so(
+                repo=self.repo,
+                so_id=self.so_id,
+                template_path=template_path,
+                pdf_out_path=tmp_pdf,
+                line_items_cents=self._collect_line_items_cents(),
+                discount_dollars=float(self.discount.value() or 0.0),
+                tax_pct=float(self.tax_pct.value() or 0.0) / 100.0,
+                notes=self.notes.toPlainText().strip(),
+                invoice_no=self.le_invoice_no.text().strip(),
+                invoice_date=self.dt_invoice.date().toPython(),
+                due_date=self.dt_due.date().toPython(),
+                show_invoice_no=False,
+            )
+            ok = self.preview.load_pdf(tmp_pdf)
+            if not ok:
+                QMessageBox.warning(self, "Preview", "Could not load PDF preview.")
+        except Exception as e:
+            QMessageBox.critical(self, "Preview Error", str(e))
+
+    # ---------- generate ----------
+    def _export_final_pdf(self):
+        self.btn_generate.setEnabled(False)
+        self.btn_generate.setText("Generating…")
+        QApplication.processEvents()
+
+        try:
+            template_path = DEFAULT_TEMPLATE_PATH
+            if not os.path.exists(template_path):
+                raise FileNotFoundError(f"Invoice template not found:\n{template_path}")
+
+            out_dir = _attachments_dir_for_so(self.so_id)
+            out_path = suggest_pdf_name(self.le_invoice_no.text().strip(), out_dir)
+
+            result_path = export_template_pdf_for_so(
+                repo=self.repo,
+                so_id=self.so_id,
+                template_path=template_path,
+                pdf_out_path=out_path,
+                line_items_cents=self._collect_line_items_cents(),
+                discount_dollars=float(self.discount.value() or 0.0),
+                tax_pct=float(self.tax_pct.value() or 0.0) / 100.0,
+                notes=self.notes.toPlainText().strip(),
+                invoice_no=self.le_invoice_no.text().strip(),
+                invoice_date=self.dt_invoice.date().toPython(),
+                due_date=self.dt_due.date().toPython(),
+                show_invoice_no=False,
+            )
+
+            # Attach to SO
+            try:
+                self.repo.add_attachment("service_order", int(self.so_id), result_path, note=f"Invoice {os.path.basename(result_path)}")
+            except Exception:
+                pass
+
+            # Mark invoiced
+            try:
+                self.repo.set_so_flags(int(self.so_id), invoiced=True, auto_create_next_on_complete=False)
+            except Exception:
+                pass
+
+            link = f"<a href='file:///{result_path.replace(os.sep, '/')}'>Open file</a>"
+            QMessageBox.information(self, "Saved", f"Invoice PDF exported:<br><b>{result_path}</b><br>{link}")
+            self.accept()
+        except Exception as e:
+            QMessageBox.critical(self, "Export failed", str(e))
+        finally:
+            self.btn_generate.setEnabled(True)
+            self.btn_generate.setText("Generate")

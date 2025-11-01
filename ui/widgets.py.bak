@@ -1,0 +1,112 @@
+from __future__ import annotations
+from PySide6.QtCore import Qt, QAbstractTableModel, QModelIndex
+from PySide6.QtWidgets import QTableView
+from models import ServiceOrder
+from repository import Repo
+
+
+class SoTableModel(QAbstractTableModel):
+    HEADERS = ["Scheduled", "Customer", "Site", "Title", "Completed", "Invoiced"]
+
+    def __init__(self, rows: list[ServiceOrder], repo: Repo | None = None):
+        super().__init__()
+        self.rows = rows
+        self.repo = repo
+
+    def rowCount(self, parent=None):
+        return len(self.rows)
+
+    def columnCount(self, parent=None):
+        return len(self.HEADERS)
+
+    def data(self, index: QModelIndex, role=Qt.DisplayRole):
+        if not index.isValid():
+            return None
+        so = self.rows[index.row()]
+        col = index.column()
+
+        # Display text
+        if role == Qt.DisplayRole:
+            if col == 0:
+                return so.scheduled_date.isoformat() if so.scheduled_date else ""
+            if col == 1:
+                return so.site.customer.name if so.site and so.site.customer else ""
+            if col == 2:
+                return so.site.name if so.site else ""
+            if col == 3:
+                return so.title
+            if col in (4, 5):
+                return ""  # handled by checkbox display
+        # Checkbox state
+        if role == Qt.CheckStateRole:
+            if col == 4:
+                return Qt.Checked if so.completed else Qt.Unchecked
+            if col == 5:
+                return Qt.Checked if so.invoiced else Qt.Unchecked
+        # Row color feedback
+        if role == Qt.BackgroundRole:
+            if so.completed:
+                from PySide6.QtGui import QColor
+                return QColor(210, 255, 210)  # light green
+            elif so.invoiced:
+                from PySide6.QtGui import QColor
+                return QColor(210, 230, 255)  # light blue
+        return None
+
+    def headerData(self, section, orientation, role=Qt.DisplayRole):
+        if role == Qt.DisplayRole and orientation == Qt.Horizontal:
+            return self.HEADERS[section]
+        return None
+
+    # Flags for editability
+    def flags(self, index: QModelIndex):
+        if not index.isValid():
+            return Qt.ItemIsEnabled
+        flags = Qt.ItemIsSelectable | Qt.ItemIsEnabled
+        if index.column() in (4, 5):
+            flags |= Qt.ItemIsUserCheckable | Qt.ItemIsEditable
+        return flags
+
+    # Handle checkbox toggles
+    def setData(self, index: QModelIndex, value, role=Qt.EditRole):
+        if not index.isValid():
+            return False
+        so = self.rows[index.row()]
+        col = index.column()
+        changed = False
+
+        if role == Qt.CheckStateRole:
+            if col == 4:
+                so.completed = value == Qt.Checked
+                changed = True
+                if self.repo:
+                    self.repo.set_so_flags(so.id, completed=so.completed)
+            elif col == 5:
+                so.invoiced = value == Qt.Checked
+                changed = True
+                if self.repo:
+                    self.repo.set_so_flags(so.id, invoiced=so.invoiced)
+
+        if changed:
+            self.dataChanged.emit(index, index, [Qt.CheckStateRole])
+        return changed
+
+    def setRows(self, rows: list[ServiceOrder]):
+        self.beginResetModel()
+        self.rows = rows
+        self.endResetModel()
+
+
+class SoTable(QTableView):
+    def __init__(self, repo: Repo | None = None):
+        super().__init__()
+        self.repo = repo
+        self.setSortingEnabled(True)
+        self.setSelectionBehavior(QTableView.SelectRows)
+        self.setAlternatingRowColors(True)
+        self.horizontalHeader().setStretchLastSection(True)
+
+    def setModel(self, model: SoTableModel):
+        super().setModel(model)
+        # autosize on set
+        self.resizeColumnsToContents()

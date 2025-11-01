@@ -1,0 +1,7 @@
+# Re-export dialog classes
+from .customer_dialog import CustomerDialog
+from .site_dialog import SiteDialog
+from .service_order_dialog import ServiceOrderDialog
+from .generate_invoice_dialog import GenerateInvoiceDialog  # optional to expose here
+
+__all__ = ["CustomerDialog", "SiteDialog", "ServiceOrderDialog", "GenerateInvoiceDialog"]

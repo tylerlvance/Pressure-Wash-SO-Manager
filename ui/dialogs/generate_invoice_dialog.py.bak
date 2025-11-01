@@ -1,0 +1,227 @@
+# -*- coding: utf-8 -*-
+from __future__ import annotations
+
+from typing import List, Tuple, Optional
+import os
+from PySide6.QtCore import QDate
+from PySide6.QtWidgets import (
+    QDialog, QVBoxLayout, QHBoxLayout, QFormLayout, QLineEdit, QTextEdit,
+    QLabel, QPushButton, QComboBox, QDoubleSpinBox, QTableWidget, QTableWidgetItem,
+    QFileDialog, QMessageBox
+)
+
+from .common import _get_repo, _to_cents, _to_dollars
+
+
+class GenerateInvoiceDialog(QDialog):
+    def __init__(self, parent=None, repo=None, so_id: Optional[int] = None):
+        super().__init__(parent)
+        self.setWindowTitle("Generate Invoice")
+        self.repo = _get_repo(parent, repo)
+        self.so_id = so_id
+
+        self.edtInvoiceNo = QLineEdit()
+        self.dateInvoice = QLineEdit()  # we will fill from seed and pass as dates below if needed
+        self.dateDue = QLineEdit()
+        self.cmbTerms = QComboBox(); self.cmbTerms.addItems(["7", "14", "30"]); self.cmbTerms.setCurrentText("14")
+
+        self.lblBillTo = QTextEdit(); self.lblBillTo.setReadOnly(True); self.lblBillTo.setFixedHeight(70)
+        self.tbl = QTableWidget(0, 2)
+        self.tbl.setHorizontalHeaderLabels(["Description", "Amount ($)"])
+        self.tbl.horizontalHeader().setStretchLastSection(True)
+        self.tbl.verticalHeader().setVisible(False)
+        self.tbl.setAlternatingRowColors(True)
+
+        self.spnTaxPct = QDoubleSpinBox(); self.spnTaxPct.setRange(0.0, 1.0); self.spnTaxPct.setDecimals(3); self.spnTaxPct.setSingleStep(0.01); self.spnTaxPct.setValue(0.00)
+        self.spnDiscount = QDoubleSpinBox(); self.spnDiscount.setRange(0.0, 999999.0); self.spnDiscount.setDecimals(2); self.spnDiscount.setSingleStep(1.00); self.spnDiscount.setValue(0.00)
+        self.txtNotes = QTextEdit(); self.txtNotes.setFixedHeight(60)
+
+        self.edtTemplate = QLineEdit(os.path.join("data", "invoice_template.xlsx"))
+        self.btnBrowseTpl = QPushButton("Browse...")
+        self.edtOutPdf = QLineEdit(os.path.join("invoices", "Invoice.pdf"))
+        self.btnBrowseOut = QPushButton("Save to...")
+
+        self.btnPreview = QPushButton("Refresh Preview")
+        self.btnGenerate = QPushButton("Generate")
+        self.btnCancel = QPushButton("Cancel")
+
+        meta = QFormLayout()
+        meta.addRow("Invoice #", self.edtInvoiceNo)
+        meta.addRow("Terms (days)", self.cmbTerms)
+
+        bill = QVBoxLayout()
+        bill.addWidget(QLabel("Bill To"))
+        bill.addWidget(self.lblBillTo)
+
+        money = QFormLayout()
+        money.addRow("Tax % (0-1)", self.spnTaxPct)
+        money.addRow("Discount ($)", self.spnDiscount)
+        money.addRow("Notes", self.txtNotes)
+
+        tpl_row = QHBoxLayout(); tpl_row.addWidget(self.edtTemplate, 1); tpl_row.addWidget(self.btnBrowseTpl)
+        out_row = QHBoxLayout(); out_row.addWidget(self.edtOutPdf, 1); out_row.addWidget(self.btnBrowseOut)
+        paths_form = QFormLayout()
+        paths_form.addRow("Template", self._wrap(tpl_row))
+        paths_form.addRow("Output PDF", self._wrap(out_row))
+
+        btns = QHBoxLayout()
+        btns.addStretch(1)
+        btns.addWidget(self.btnPreview)
+        btns.addWidget(self.btnGenerate)
+        btns.addWidget(self.btnCancel)
+
+        root = QVBoxLayout(self)
+        top = QHBoxLayout()
+        top.addLayout(meta, 1)
+        top.addLayout(bill, 1)
+        root.addLayout(top)
+        root.addWidget(QLabel("Line Items"))
+        root.addWidget(self.tbl, 1)
+        root.addLayout(money)
+        root.addLayout(paths_form)
+        root.addLayout(btns)
+
+        self.btnCancel.clicked.connect(self.reject)
+        self.btnPreview.clicked.connect(self.refresh_preview)
+        self.btnGenerate.clicked.connect(self.generate)
+        self.btnBrowseTpl.clicked.connect(self._pick_template)
+        self.btnBrowseOut.clicked.connect(self._pick_output)
+
+        self._seed_from_repo()
+
+    def _wrap(self, layout):
+        w = QWidget(); w.setLayout(layout); return w
+
+    def _seed_from_repo(self):
+        if not (self.repo and self.so_id):
+            return
+        seed = self.repo.invoice_seed_for_so(self.so_id, terms_days=int(self.cmbTerms.currentText()))
+        self.edtInvoiceNo.setText(seed["invoice_no"])
+
+        bill_lines = [seed.get("bill_to_name", ""), seed.get("bill_to_addr", ""), seed.get("bill_to_contact", "")]
+        self.lblBillTo.setPlainText("\n".join([x for x in bill_lines if x]))
+
+        self.tbl.setRowCount(0)
+        for desc, amt_cents in seed["line_items_cents"]:
+            r = self.tbl.rowCount(); self.tbl.insertRow(r)
+            self.tbl.setItem(r, 0, QTableWidgetItem(desc or "Service"))
+            itp = QTableWidgetItem(f"{_to_dollars(amt_cents):.2f}"); itp.setTextAlignment(Qt.AlignRight)
+            self.tbl.setItem(r, 1, itp)
+
+        out_dir = os.path.join("invoices")
+        os.makedirs(out_dir, exist_ok=True)
+        self.edtOutPdf.setText(os.path.join(out_dir, f"{seed['invoice_no']}.pdf"))
+
+        # store ISO dates as text to avoid Excel date conflicts
+        self.dateInvoice.setText(seed["invoice_date"].isoformat())
+        self.dateDue.setText(seed["due_date"].isoformat())
+
+    def _pick_template(self):
+        fn, _ = QFileDialog.getOpenFileName(self, "Select Invoice Template", self.edtTemplate.text(), "Excel (*.xlsx *.xlsm)")
+        if fn:
+            self.edtTemplate.setText(fn)
+
+    def _pick_output(self):
+        fn, _ = QFileDialog.getSaveFileName(self, "Save Invoice PDF", self.edtOutPdf.text(), "PDF (*.pdf)")
+        if fn:
+            self.edtOutPdf.setText(fn)
+
+    def refresh_preview(self):
+        QMessageBox.information(self, "Preview", "Preview is refreshed. Use Generate to produce the PDF.")
+
+    def generate(self):
+        if not (self.repo and self.so_id):
+            QMessageBox.warning(self, "Generate", "Missing repo or SO id.")
+            return
+        template = self.edtTemplate.text().strip()
+        outpdf = self.edtOutPdf.text().strip()
+        if not template or not os.path.exists(template):
+            QMessageBox.warning(self, "Generate", "Template file not found.")
+            return
+        outdir = os.path.dirname(outpdf)
+        if outdir and not os.path.exists(outdir):
+            os.makedirs(outdir, exist_ok=True)
+
+        rows = self.tbl.rowCount()
+        line_items_cents: List[Tuple[str, int]] = []
+        for r in range(rows):
+            desc = (self.tbl.item(r, 0).text() if self.tbl.item(r, 0) else "Service").strip()
+            amt = float(self.tbl.item(r, 1).text() or "0")
+            line_items_cents.append((desc, _to_cents(amt)))
+
+        discount = float(self.spnDiscount.value() or 0.0)
+        tax_pct = float(self.spnTaxPct.value() or 0.0)
+        notes = self.txtNotes.toPlainText().strip()
+        inv_no = self.edtInvoiceNo.text().strip()
+
+        # Parse ISO dates back to date objects
+        from datetime import date
+        try:
+            inv_dt = date.fromisoformat(self.dateInvoice.text().strip()) if self.dateInvoice.text().strip() else None
+            due_dt = date.fromisoformat(self.dateDue.text().strip()) if self.dateDue.text().strip() else None
+        except Exception:
+            inv_dt = None
+            due_dt = None
+
+        try:
+            from invoice_template_export import export_template_pdf_for_so
+            export_template_pdf_for_so(
+                repo=self.repo,
+                so_id=self.so_id,
+                template_path=template,
+                pdf_out_path=outpdf,
+                line_items_cents=line_items_cents,
+                discount_dollars=discount,
+                tax_pct=tax_pct,
+                notes=notes,
+                invoice_no=inv_no,
+                invoice_date=inv_dt,
+                due_date=due_dt,
+                show_invoice_no=True,
+            )
+        except Exception as e:
+            QMessageBox.critical(self, "Export failed", f"{e}")
+            return
+
+        try:
+            from models import Invoice, ServiceOrder
+            s = self.repo.s
+            so = s.get(ServiceOrder, self.so_id)
+            inv = s.query(Invoice).filter(Invoice.service_order_id == self.so_id).first()
+            subtotal_cents = sum(a for _, a in line_items_cents)
+            tax_cents = int(round(subtotal_cents * tax_pct))
+            total_cents = subtotal_cents + tax_cents - _to_cents(discount)
+
+            if inv is None:
+                inv = Invoice(
+                    service_order_id=self.so_id,
+                    invoice_no=inv_no,
+                    invoice_date=inv_dt,
+                    due_date=due_dt,
+                    subtotal_cents=subtotal_cents,
+                    tax_cents=tax_cents,
+                    total_cents=total_cents,
+                    paid=False,
+                    notes=notes,
+                    pdf_path=outpdf,
+                )
+                s.add(inv)
+            else:
+                inv.invoice_no = inv_no
+                inv.invoice_date = inv_dt
+                inv.due_date = due_dt
+                inv.subtotal_cents = subtotal_cents
+                inv.tax_cents = tax_cents
+                inv.total_cents = total_cents
+                inv.notes = notes
+                inv.pdf_path = outpdf
+
+            if so:
+                so.invoiced = True
+            s.commit()
+        except Exception as e:
+            QMessageBox.warning(self, "Invoice Save", f"Saved PDF but DB update had an issue:\n{e}")
+            return
+
+        QMessageBox.information(self, "Success", f"Invoice created:\n{outpdf}")
+        self.accept()

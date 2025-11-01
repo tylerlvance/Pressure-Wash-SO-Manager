@@ -1,0 +1,18 @@
+# C:\Users\tyler\Desktop\FoundersSOManager\db_bootstrap.py
+# -*- coding: utf-8 -*-
+from __future__ import annotations
+from sqlalchemy import create_engine, event
+from sqlalchemy.orm import sessionmaker
+from sqlalchemy.engine import Engine
+
+# Use your actual DB path
+engine = create_engine("sqlite:///data/founders_manager.db", future=True)
+
+# Critical for SQLite to honor ON DELETE CASCADE
+@event.listens_for(Engine, "connect")
+def _set_sqlite_pragma(dbapi_conn, conn_record):
+    cur = dbapi_conn.cursor()
+    cur.execute("PRAGMA foreign_keys=ON")
+    cur.close()
+
+SessionLocal = sessionmaker(bind=engine, autoflush=False, autocommit=False, future=True)

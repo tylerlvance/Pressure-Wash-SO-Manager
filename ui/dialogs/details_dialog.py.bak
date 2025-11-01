@@ -1,0 +1,99 @@
+from __future__ import annotations
+
+from typing import Optional, Iterable
+from PySide6.QtCore import Qt
+from PySide6.QtWidgets import (
+    QDialog, QVBoxLayout, QHBoxLayout, QFormLayout, QLineEdit, QTextEdit,
+    QLabel, QPushButton, QTableWidget, QTableWidgetItem, QGroupBox,
+    QAbstractItemView, QHeaderView
+)
+
+# Local helper so we don't depend on other modules.
+def _to_dollars(cents: int) -> float:
+    return float(cents or 0) / 100.0
+
+
+def _ro_line(text: str = "") -> QLineEdit:
+    le = QLineEdit(text or "")
+    le.setReadOnly(True)
+    le.setCursorPosition(0)
+    # QLineEdit already allows selecting/copying when readOnly=True
+    return le
+
+def _ro_text(text: str = "") -> QTextEdit:
+    te = QTextEdit()
+    te.setPlainText(text or "")
+    te.setReadOnly(True)
+    te.setMinimumHeight(60)
+    # Explicitly allow mouse and keyboard selection + copy
+    te.setTextInteractionFlags(Qt.TextSelectableByMouse | Qt.TextSelectableByKeyboard)
+    return te
+
+
+class CustomerSiteDetailsDialog(QDialog):
+    """
+    Read-only viewer for Customer and optional Site.
+    Fields are selectable so you can click-drag and Ctrl+C.
+    """
+    def __init__(self, parent=None, *, customer=None, site=None, services: Optional[Iterable]=None):
+        super().__init__(parent)
+        self.setWindowTitle("Details")
+        root = QVBoxLayout(self)
+
+        # Customer block
+        if customer is not None:
+            gb_c = QGroupBox("Customer")
+            form_c = QFormLayout(gb_c)
+            form_c.addRow("Name", _ro_line(getattr(customer, "name", "")))
+            form_c.addRow("Phone", _ro_line(getattr(customer, "phone", "")))
+            form_c.addRow("Email", _ro_line(getattr(customer, "email", "")))
+            form_c.addRow("Notes", _ro_text(getattr(customer, "notes", "")))
+            root.addWidget(gb_c)
+
+        # Site block
+        if site is not None:
+            gb_s = QGroupBox("Site")
+            form_s = QFormLayout(gb_s)
+            form_s.addRow("Name", _ro_line(getattr(site, "name", "")))
+            form_s.addRow("Address", _ro_text(getattr(site, "address", "")))
+            form_s.addRow("POC Name", _ro_line(getattr(site, "poc_name", "")))
+            form_s.addRow("POC Phone", _ro_line(getattr(site, "poc_phone", "")))
+            form_s.addRow("POC Email", _ro_line(getattr(site, "poc_email", "")))
+            form_s.addRow("Cadence", _ro_line(getattr(site, "cadence_text", "")))
+            form_s.addRow("Notes", _ro_text(getattr(site, "notes", "")))
+            root.addWidget(gb_s)
+
+            # Services table if provided
+            if services is not None:
+                gb_sv = QGroupBox("Contracted Services")
+                tbl = QTableWidget(0, 2, gb_sv)
+                tbl.setHorizontalHeaderLabels(["Service", "Price ($)"])
+                tbl.horizontalHeader().setSectionResizeMode(0, QHeaderView.Stretch)
+                tbl.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeToContents)
+                tbl.verticalHeader().setVisible(False)
+                tbl.setAlternatingRowColors(True)
+                tbl.setSelectionBehavior(QAbstractItemView.SelectRows)
+                tbl.setSelectionMode(QAbstractItemView.SingleSelection)
+                tbl.setEditTriggers(QAbstractItemView.NoEditTriggers)
+
+                for row in services:
+                    r = tbl.rowCount()
+                    tbl.insertRow(r)
+                    name = getattr(row, "name", "") or ""
+                    price = _to_dollars(getattr(row, "unit_price_cents", 0))
+                    tbl.setItem(r, 0, QTableWidgetItem(name))
+                    itp = QTableWidgetItem(f"{price:.2f}")
+                    itp.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
+                    tbl.setItem(r, 1, itp)
+
+                layout_sv = QVBoxLayout(gb_sv)
+                layout_sv.addWidget(tbl)
+                root.addWidget(gb_sv)
+
+        # Close button
+        btns = QHBoxLayout()
+        btns.addStretch(1)
+        btn_close = QPushButton("Close")
+        btn_close.clicked.connect(self.accept)
+        btns.addWidget(btn_close)
+        root.addLayout(btns)
